@@ -1,3 +1,0 @@
-/falco-trace/pdig/build/CMakeFiles/rebuild_cache.dir
-/falco-trace/pdig/build/CMakeFiles/pdig.dir
-/falco-trace/pdig/build/CMakeFiles/edit_cache.dir
