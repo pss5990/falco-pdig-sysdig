@@ -22,7 +22,7 @@ limitations under the License.
 #include <limits.h>
 #include <stdlib.h>
 #include <sys/time.h>
-#ifdef __GLIBC__ 
+#ifdef __GLIBC__
 #include <execinfo.h>
 #endif
 #include <unistd.h>
@@ -1465,6 +1465,8 @@ const char* param_type_to_string(ppm_param_type pt)
 		return "CHARBUFARRAY";
 	case PT_CHARBUF_PAIR_ARRAY:
 		return "CHARBUF_PAIR_ARRAY";
+	case PT_FSRELPATH:
+		return "FSRELPATH";
 	default:
 		ASSERT(false);
 		return "<NA>";

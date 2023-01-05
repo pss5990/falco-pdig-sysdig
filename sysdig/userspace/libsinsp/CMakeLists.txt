@@ -23,6 +23,10 @@ include_directories(./include)
 include_directories("${JSONCPP_INCLUDE}")
 include_directories("${LUAJIT_INCLUDE}")
 
+if(NOT MINIMAL_BUILD)
+	include_directories("${CARES_INCLUDE}")
+endif()
+
 if(NOT WIN32 AND NOT APPLE)
 	include_directories("${B64_INCLUDE}")
 	include_directories("${CURSES_INCLUDE_DIR}")
@@ -93,6 +97,7 @@ set(SINSP_SOURCES
 
 if(NOT MINIMAL_BUILD)
 	list(APPEND SINSP_SOURCES
+		addrinfo.cpp
 		sinsp_auth.cpp
 		k8s.cpp
 		k8s_api_error.cpp
@@ -150,11 +155,12 @@ endif()
 
 add_library(sinsp STATIC ${SINSP_SOURCES})
 
-target_link_libraries(sinsp 
+target_link_libraries(sinsp
 	scap
 	"${CURL_LIBRARIES}"
 	"${JSONCPP_LIB}"
-	"${TBB_LIB}")
+	"${TBB_LIB}"
+	"${CARES_LIB}")
 
 if(USE_BUNDLED_LUAJIT)
 	add_dependencies(sinsp luajit)
@@ -174,14 +180,26 @@ if(NOT WIN32)
 
 	if(NOT APPLE)
 		if(NOT MINIMAL_BUILD)
+			configure_file(${CMAKE_CURRENT_SOURCE_DIR}/cri.proto ${CMAKE_CURRENT_BINARY_DIR}/cri.proto COPYONLY)
+			set(CRI_PROTO_PATCH_MUSL_COMMAND "")
+			if (MUSL_OPTIMIZED_BUILD)
+				# We need to patch the CRI proto while under musl because musl
+				# does not fully respect the standard and defines stdin, stdout and stderr
+				# as compile time constants. However, those are already defined in cri.proto and that is a reference collision.
+				# see: https://git.musl-libc.org/cgit/musl/tree/include/stdio.h?id=0b0640219338b80cf47026d1970b5503414ed7f3#n60
+				configure_file(${CMAKE_CURRENT_SOURCE_DIR}/cmake/patch/musl-cri.proto.patch ${CMAKE_CURRENT_BINARY_DIR}/cmake/patch/musl-cri.proto.patch COPYONLY)
+				set(CRI_PROTO_PATCH_MUSL_COMMAND patch -d ${CMAKE_CURRENT_BINARY_DIR}  -p3 -i ${CMAKE_CURRENT_BINARY_DIR}/cmake/patch/musl-cri.proto.patch)
+			endif()
+
 			add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/cri.grpc.pb.cc
 						${CMAKE_CURRENT_BINARY_DIR}/cri.grpc.pb.h
 						${CMAKE_CURRENT_BINARY_DIR}/cri.pb.cc
 						${CMAKE_CURRENT_BINARY_DIR}/cri.pb.h
 					COMMENT "Generate CRI grpc code"
-					DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/cri.proto
-					COMMAND ${PROTOC} -I ${CMAKE_CURRENT_SOURCE_DIR} --cpp_out=. ${CMAKE_CURRENT_SOURCE_DIR}/cri.proto
-					COMMAND ${PROTOC} -I ${CMAKE_CURRENT_SOURCE_DIR} --grpc_out=. --plugin=protoc-gen-grpc=${GRPC_CPP_PLUGIN} ${CMAKE_CURRENT_SOURCE_DIR}/cri.proto
+					DEPENDS
+					COMMAND ${CRI_PROTO_PATCH_MUSL_COMMAND}
+					COMMAND ${PROTOC} -I ${CMAKE_CURRENT_BINARY_DIR} --cpp_out=. ${CMAKE_CURRENT_BINARY_DIR}/cri.proto
+					COMMAND ${PROTOC} -I ${CMAKE_CURRENT_BINARY_DIR} --grpc_out=. --plugin=protoc-gen-grpc=${GRPC_CPP_PLUGIN} ${CMAKE_CURRENT_BINARY_DIR}/cri.proto
 					WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 
 			if(USE_BUNDLED_GRPC)
@@ -194,9 +212,14 @@ if(NOT WIN32)
 				"${PROTOBUF_LIB}"
 				"${CARES_LIB}"
 				"${JQ_LIB}"
-				"${B64_LIB}"
+				"${B64_LIB}")
+
+			if(NOT MUSL_OPTIMIZED_BUILD)
+			target_link_libraries(sinsp
 				rt
 				anl)
+			endif()
+
 		else()
 			target_link_libraries(sinsp
 				"${JQ_LIB}"

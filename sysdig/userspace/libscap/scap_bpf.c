@@ -28,7 +28,7 @@ limitations under the License.
 #include <sys/utsname.h>
 #ifndef MINIMAL_BUILD
 #include <gelf.h>
-#endif
+#endif // MINIMAL_BUILD
 #include <fcntl.h>
 #include <errno.h>
 #include <ctype.h>
@@ -211,9 +211,7 @@ static int32_t get_elf_section(Elf *elf, int i, GElf_Ehdr *ehdr, char **shname, 
 
 	return SCAP_SUCCESS;
 }
-#endif
 
-#ifndef MINIMAL_BUILD
 static int cmp_symbols(const void *l, const void *r)
 {
 	const GElf_Sym *lsym = (const GElf_Sym *)l;
@@ -232,7 +230,6 @@ static int cmp_symbols(const void *l, const void *r)
 		return 0;
 	}
 }
-
 
 static int32_t load_elf_maps_section(scap_t *handle, struct bpf_map_data *maps,
 				     int maps_shndx, Elf *elf, Elf_Data *symbols,

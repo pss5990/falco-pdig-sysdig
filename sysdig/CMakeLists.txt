@@ -37,7 +37,7 @@ cmake_minimum_required(VERSION 2.8.2)
 
 project(sysdig)
 
-option(MINIMAL_BUILD "Produce a minimal sysdig binary with only the essential features, no eBPF probe driver, no kubernetes, no mesos, no marathon and no container metadata" OFF)
+option(MINIMAL_BUILD "Produce a minimal sysdig binary with only the essential features (no eBPF probe driver, no kubernetes, no mesos, no marathon and no container metadata)" OFF)
 option(MUSL_OPTIMIZED_BUILD "Enable if you want a musl optimized build" OFF)
 
 # Add path for custom CMake modules.
@@ -67,10 +67,14 @@ if(MINIMAL_BUILD)
   set(MINIMAL_BUILD_FLAGS "-DMINIMAL_BUILD")
 endif()
 
+if(MUSL_OPTIMIZED_BUILD)
+	set(SYSDIG_MUSL_FLAGS "-static -Os")
+endif()
+
+
 if(NOT WIN32)
 
 	set(SYSDIG_DEBUG_FLAGS "-D_DEBUG")
-	set(SYSDIG_MUSL_FLAGS "-static -Os -D__NEED_struct_timespec -D__NEED_time_t")
 	set(CMAKE_COMMON_FLAGS "-Wall -ggdb ${MINIMAL_BUILD_FLAGS} ${SYSDIG_MUSL_FLAGS}")
 
 	if(BUILD_WARNINGS_AS_ERRORS)
@@ -187,7 +191,7 @@ else()
                         BUILD_COMMAND ${CMD_MAKE}
                         BUILD_IN_SOURCE 1
                         BUILD_BYPRODUCTS ${LUAJIT_LIB}
-                        INSTALL_COMMAND "")		
+                        INSTALL_COMMAND "")
 		else()
 		ExternalProject_Add(luajit
 			URL "http://download.draios.com/dependencies/LuaJIT-2.0.3.tar.gz"
@@ -459,7 +463,7 @@ if(NOT WIN32 AND NOT MINIMAL_BUILD)
 	endif()
 endif() # NOT WIN32 AND NOT MINIMAL_BUILD
 
-if(NOT WIN32 AND NOT APPLE)
+if(NOT MINIMAL_BUILD)
 	option(USE_BUNDLED_CARES "Enable building of the bundled c-ares" ${USE_BUNDLED_DEPS})
 	if(NOT USE_BUNDLED_CARES)
 		find_path(CARES_INCLUDE NAMES cares/ares.h ares.h)
@@ -483,7 +487,9 @@ if(NOT WIN32 AND NOT APPLE)
 		BUILD_BYPRODUCTS ${CARES_INCLUDE} ${CARES_LIB}
 		INSTALL_COMMAND ${CMD_MAKE} install)
 	endif()
+endif() # NOT MINIMAL_BUILD
 
+if(NOT WIN32 AND NOT APPLE)
 	if(NOT MINIMAL_BUILD)
 		option(USE_BUNDLED_PROTOBUF "Enable building of the bundled protobuf" ${USE_BUNDLED_DEPS})
 		if(NOT USE_BUNDLED_PROTOBUF)

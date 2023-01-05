@@ -18,7 +18,6 @@ limitations under the License.
 */
 
 #pragma once
-#include <bits/alltypes.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -59,6 +58,9 @@ struct iovec;
 //
 // Core types
 //
+#ifndef __APPLE__
+#include <time.h>
+#endif
 #include "uthash.h"
 #include "../common/sysdig_types.h"
 #include "../../driver/ppm_events_public.h"
@@ -545,9 +547,9 @@ struct udig_ring_buffer_status {
 typedef struct ppm_ring_buffer_info ppm_ring_buffer_info;
 
 int32_t udig_alloc_ring(int* ring_fd, uint8_t** ring, uint32_t *ringsize, char *error);
-int32_t udig_alloc_ring_descriptors(int* ring_descs_fd, 
-	struct ppm_ring_buffer_info** ring_info, 
-	struct udig_ring_buffer_status** ring_status, 
+int32_t udig_alloc_ring_descriptors(int* ring_descs_fd,
+	struct ppm_ring_buffer_info** ring_info,
+	struct udig_ring_buffer_status** ring_status,
 	char *error);
 void udig_free_ring(uint8_t* addr, uint32_t size);
 void udig_free_ring_descriptors(uint8_t* addr);
