@@ -37,7 +37,7 @@ typedef struct wh_t wh_t;
 #include <crtdbg.h>
 #endif
 #include <assert.h>
-#ifdef USE_ZLIB
+#if defined(USE_ZLIB) && !defined(UDIG)
 #include <zlib.h>
 #else
 #define	gzFile FILE*
@@ -48,6 +48,8 @@ typedef struct wh_t wh_t;
 #define gzoffset ftell
 #define gzwrite(F, B, S) fwrite(B, 1, S, F)
 #define gzread(F, B, S) fread(B, 1, S, F)
+#define gztell(F) ftell(F)
+#define gzerror(F, E) ({*E = ferror(F); "error reading file descriptor";})
 #define gzseek fseek
 #endif
 
@@ -75,7 +77,9 @@ typedef struct wh_t wh_t;
 typedef struct scap_device
 {
 	int m_fd;
+	int m_bufinfo_fd; // used by udig
 	char* m_buffer;
+	uint32_t m_buffer_size; // used by udig
 	uint32_t m_lastreadsize;
 	char* m_sn_next_event; // Pointer to the next event available for scap_next
 	uint32_t m_sn_len; // Number of bytes available in the buffer pointed by m_sn_next_event
@@ -85,6 +89,7 @@ typedef struct scap_device
 		struct
 		{
 			struct ppm_ring_buffer_info* m_bufinfo;
+			struct udig_ring_buffer_status* m_bufstatus; // used by udig
 		};
 		// Anonymous struct with bpf stuff
 		struct
@@ -142,6 +147,8 @@ struct scap
 	wh_t* m_whh;
 #endif
 	bool m_bpf;
+	bool m_udig;
+	bool m_udig_capturing;
 	// Anonymous struct with bpf stuff
 	struct
 	{
@@ -252,6 +259,8 @@ int32_t scap_fd_scan_fd_dir(scap_t* handle, char * procdir, scap_threadinfo* pi,
 int32_t scap_fd_read_ipv4_sockets_from_proc_fs(scap_t* handle, const char * dir, int l4proto, scap_fdinfo ** sockets);
 // read all sockets and add them to the socket table hashed by their ino
 int32_t scap_fd_read_sockets(scap_t* handle, char* procdir, struct scap_ns_socket_list* sockets, char *error);
+// get the device major/minor number for the requested_mount_id, looking in procdir/mountinfo if needed
+uint32_t scap_get_device_by_mount_id(scap_t *handle, const char *procdir, unsigned long requested_mount_id);
 // prints procs details for a give tid
 void scap_proc_print_proc_by_tid(scap_t* handle, uint64_t tid);
 // Allocate and return the list of interfaces on this system
@@ -350,6 +359,17 @@ extern const struct ppm_event_info g_event_info[];
 extern const struct ppm_syscall_desc g_syscall_info_table[];
 extern const struct ppm_event_entry g_ppm_events[];
 extern bool validate_info_table_size();
+
+//
+// udig stuff
+//
+int32_t udig_begin_capture(scap_t* handle, char *error);
+void udig_start_capture(scap_t* handle);
+void udig_stop_capture(scap_t* handle);
+void udig_end_capture(scap_t* handle);
+uint32_t udig_set_snaplen(scap_t* handle, uint32_t snaplen);
+int32_t udig_stop_dropping_mode(scap_t* handle);
+int32_t udig_start_dropping_mode(scap_t* handle, uint32_t sampling_ratio);
 
 #ifdef __cplusplus
 }

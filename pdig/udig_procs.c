@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include <errno.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -255,14 +256,14 @@ int32_t scap_proc_fill_info_from_stats(char* procdirname, struct scap_threadinfo
 	f = fopen(filename, "r");
 	if(f == NULL)
 	{
-		cprintf("read stat file %s failed (%s)", filename);
+		cprintf("read stat file %s failed (%s)", filename, strerror(errno));
 		return PPM_FAILURE_BUG;
 	}
 
 	if(fgets(line, sizeof(line), f) == NULL)
 	{
 		fclose(f);
-		cprintf("Could not read from stat file %s (%s)", filename);
+		cprintf("Could not read from stat file %s (%s)", filename, strerror(errno));
 		return PPM_FAILURE_BUG;
 	}
 
@@ -729,7 +730,11 @@ int udig_finish_clone_fill(struct event_filler_arguments *args, scap_threadinfo*
 	//
 	// flags
 	//
-	syscall_get_arguments_deprecated(current, args->regs, 0, 1, &val);
+	if(args->event_type == PPME_SYSCALL_CLONE_20_E) {
+		syscall_get_arguments_deprecated(current, args->regs, 0, 1, &val);
+	} else {
+		val = 0;
+	}
 	res = val_to_ring(args, (uint64_t)clone_flags_to_scap(val), 0, false, 0);
 	if (unlikely(res != PPM_SUCCESS))
 		return res;

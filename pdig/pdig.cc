@@ -6,7 +6,6 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -21,244 +20,385 @@
 #include <sys/uio.h>
 #include <limits.h>
 #include <syscall.h>
+#include <sched.h>
 
 #include <atomic>
-#include <unordered_map>
+
+#include "pdig_api.h"
+#include "pdig_debug.h"
+#include "pdig_ptrace.h"
+#include "pdig_proc.h"
+#include "pdig_seccomp.h"
+#include "proc_tree.h"
 
 
-struct pdig_process_context {
-	pdig_process_context() : saw_initial_sigstop(false), syscall_enter(true), clone_flags(0), parent_clone_flags(0), pid(0) {}
-	pdig_process_context(const pdig_process_context&) = delete;
-	pdig_process_context& operator= (const pdig_process_context&) = delete;
-
-	bool saw_initial_sigstop;
-	bool syscall_enter;
-	uint64_t clone_flags; // clone() flags this thread was created with
-	uint64_t parent_clone_flags; // clone() flags when this thread is a parent
-	pid_t pid; // we know the tid but need to store the pid somewhere
-};
-
-
-extern "C" {
-#include "pdig.h"
-#include "udig_capture.h"
-#include "ppm_events_public.h"
-#include "ppm.h"
-}
-
-#define EXPECT(v) do { \
-    int __ret = (v); \
-	if(__ret < 0) { \
-		fprintf(stderr, "%s failed at %s:%d with %d (errno %s)\n", #v, __FILE__, __LINE__, __ret, strerror(errno)); \
-		abort(); \
-	} \
-} while(0)
-
-#ifdef _DEBUG
-#define DEBUG(...) fprintf(stderr, __VA_ARGS__)
-#else
-#define DEBUG(...)
-#endif
-
-#define WARN(fmt, ...) fprintf(stderr, fmt " at %s:%d (errno %s)\n", __VA_ARGS__, __FILE__, __LINE__, strerror(errno))
+static std::atomic<bool> die(false);
 
 void ignore_sig(int _sig)
 {
 }
 
-std::unordered_map<pid_t, pdig_process_context> procs;
+static constexpr const uintptr_t PTRACE_FLAGS =
+	PTRACE_O_TRACESYSGOOD | \
+	PTRACE_O_EXITKILL | \
+	PTRACE_O_TRACEFORK | \
+	PTRACE_O_TRACECLONE | \
+	PTRACE_O_TRACEVFORK | \
+	PTRACE_O_TRACEEXEC | \
+	PTRACE_O_TRACEEXIT;
 
-void handle_clone_exit(pid_t pid, const pdig_process_context& pctx)
+static constexpr const uintptr_t SECCOMP_FLAGS = PTRACE_FLAGS | PTRACE_O_TRACESECCOMP;
+
+static constexpr void* ptrace_options(bool use_seccomp)
 {
-	if(pctx.clone_flags) {
-		uint64_t context[CTX_PID_TID + 1] = {0};
-		context[CTX_REG_RAX_ENTER] = __NR_clone;
-		context[CTX_REG_RAX] = 0;
-		context[CTX_REG_RDI] = pctx.clone_flags;
-		context[CTX_PID_TID] = ((uint64_t)pctx.pid) << 32 | pid;
-		DEBUG("clone pid_tid = %016lx flags = %08lx\n", context[CTX_PID_TID], pctx.clone_flags);
-		on_syscall(context, false);
+	return (void*)(use_seccomp ? SECCOMP_FLAGS : PTRACE_FLAGS);
+}
+
+
+static bool wait_for_next_syscall(pid_t tid, pdig_process_context& pctx)
+{
+	if(pctx.use_seccomp) {
+		EXPECT(ptrace(PTRACE_CONT, tid, NULL, NULL));
+	} else {
+		EXPECT(ptrace(PTRACE_SYSCALL, tid, NULL, NULL));
 	}
+
+	pctx.state = process_state::waiting_for_enter;
+	return true;
+}
+
+static bool deliver_signal(pid_t tid, pdig_process_context& pctx, int sig)
+{
+	if(pctx.use_seccomp) {
+		EXPECT(ptrace(PTRACE_CONT, tid, sig, sig));
+	} else {
+		EXPECT(ptrace(PTRACE_SYSCALL, tid, sig, sig));
+	}
+
+	pctx.state = process_state::waiting_for_enter;
+	return true;
 }
 
 void handle_syscall(pid_t pid, pdig_process_context& pctx, bool enter)
 {
 	struct user_regs_struct regs;
-	uint64_t context[CTX_PID_TID + 1];
+	uint64_t context[CTX_SIZE];
+	unsigned long syscall_nr;
 
 	if (ptrace(PTRACE_GETREGS, pid, &regs, &regs) < 0) {
 		WARN("PTRACE_GETREGS failed for pid %d", pid);
 		return;
 	}
-	context[CTX_REG_RDI] = regs.rdi;
-	context[CTX_REG_RSI] = regs.rsi;
-	context[CTX_REG_RDX] = regs.rdx;
-	context[CTX_REG_R10] = regs.r10;
-	context[CTX_REG_R8]  = regs.r8;
-	context[CTX_REG_R9]  = regs.r9;
-	context[CTX_REG_RAX_ENTER] = regs.orig_rax;
-	context[CTX_REG_RAX] = regs.rax;
-	context[CTX_PID_TID] = ((uint64_t)pctx.pid) << 32 | pid;
+	fill_context(context, pid, pctx.pid, regs);
+	syscall_nr = context[CTX_SYSCALL_ID];
 
-	DEBUG("pid=%d tid=%d syscall=%lld ret=%lld enter=%d rip=%016llx\n", pctx.pid, pid, regs.orig_rax, regs.rax, enter, regs.rip);
+	DEBUG("pid=%d tid=%d syscall=%ld ret=%ld enter=%d\n",
+		pctx.pid, pid, syscall_nr, context[CTX_RETVAL], enter);
 
-	if(regs.orig_rax == __NR_rt_sigreturn)
+	if(syscall_nr == __NR_rt_sigreturn)
 	{
 		DEBUG("rt_sigreturn, faking exit event\n");
 		on_syscall(context, false);
 	}
-	else if(regs.orig_rax == __NR_execve && regs.rax == 0)
+	else if(syscall_nr == __NR_execve && context[CTX_RETVAL] == 0)
 	{
 		DEBUG("ignoring execve return, will capture PTRACE_EVENT_EXEC\n");
 	}
-	else if((int64_t)regs.orig_rax >= 0)
+	else if((int64_t)syscall_nr >= 0)
 	{
 		// rt_sigreturn yields two events, the other one with orig_rax == -1, ignore it
 		on_syscall(context, enter);
 
-		if(regs.orig_rax == __NR_clone && enter)
-		{
-			DEBUG("SYSCALL tid %d clone(%08llx)\n", pid, regs.rdi);
-			pctx.parent_clone_flags = regs.rdi;
+		if(enter) {
+			switch(syscall_nr) {
+			case __NR_clone:
+			case __NR_fork:
+			case __NR_vfork:
+				DEBUG("SYSCALL tid %d clone syscall %lu flags=%08lx\n", pid, syscall_nr, context[CTX_ARG0]);
+				pctx.clone_syscall = syscall_nr;
+				pctx.clone_flags = context[CTX_ARG0];
+				// TODO: clone3() will need a dedicated memory region copy_from_user()'d here instead
+			}
 		}
 	}
 }
 
-void handle_ptrace_clone_event(pid_t tid)
+// state transitions
+
+static bool handle_execve_exit(pid_t tid, pdig_process_context& pctx)
+{
+	uint64_t context[CTX_SIZE] = {0};
+	context[CTX_SYSCALL_ID] = __NR_execve;
+	context[CTX_RETVAL] = 0;
+	context[CTX_PID_TID] = ((uint64_t)tid) << 32 | tid; // pid == tid here
+	on_syscall(context, false);
+	return wait_for_next_syscall(tid, pctx);
+}
+
+static bool handle_exit(pid_t tid, pdig_process_context& pctx)
+{
+	record_procexit_event(tid, pctx.pid);
+	return wait_for_next_syscall(tid, pctx);
+}
+
+static bool handle_spawning(pid_t tid, pdig_process_context& pctx);
+
+static bool handle_ptrace_clone_event(pid_t tid, pdig_process_context& pctx, pdig_context& main_ctx)
 {
 	uint64_t child_tid;
 	if (ptrace(PTRACE_GETEVENTMSG, tid, NULL, &child_tid) < 0) {
 		WARN("PTRACE_GETEVENTMSG failed for tid %d", tid);
-		return;
+		return wait_for_next_syscall(tid, pctx);
 	}
 
-	DEBUG("CLONE tid %d cloned to %lu with flags %08lx\n", tid, child_tid, procs[tid].parent_clone_flags);
-	procs[child_tid].clone_flags = procs[tid].parent_clone_flags;
-}
+	pid_t new_tgid;
+	if (pctx.clone_flags & CLONE_THREAD) {
+		new_tgid = pctx.pid;
+	} else {
+		new_tgid = child_tid;
+	}
 
-void handle_execve_exit(pid_t pid)
-{
-	uint64_t context[CTX_PID_TID + 1] = {0};
-	context[CTX_REG_RAX_ENTER] = __NR_execve;
-	context[CTX_REG_RAX] = 0;
-	context[CTX_PID_TID] = ((uint64_t)pid) << 32 | pid; // pid == tid here
+	DEBUG("CLONE tid %d cloned to %lu (new tgid %d) with flags %08lx\n", tid, child_tid, new_tgid, pctx.clone_flags);
+	auto it = main_ctx.procs.insert({
+		child_tid,
+		{
+			process_state::waiting_for_enter,
+			pctx.use_seccomp,
+			new_tgid,
+		}
+	});
+
+	uint64_t context[CTX_SIZE] = {0};
+	context[CTX_SYSCALL_ID] = pctx.clone_syscall;
+	context[CTX_RETVAL] = 0;
+	context[CTX_ARG0] = pctx.clone_flags;
+	context[CTX_PID_TID] = ((uint64_t)new_tgid) << 32 | child_tid;
+	DEBUG("clone pid_tid = %016lx flags = %08lx\n", context[CTX_PID_TID], pctx.clone_flags);
 	on_syscall(context, false);
+
+	if(!it.second) {
+		// the process was already there, which means it's stopped
+		// we need to fix up its state and wake it up
+		it.first->second.use_seccomp = pctx.use_seccomp;
+		it.first->second.pid = new_tgid;
+		handle_spawning(child_tid, it.first->second);
+	}
+
+	return wait_for_next_syscall(tid, pctx);
 }
 
-int get_pid(pid_t tid)
+static bool handle_early_sigstop(pid_t tid, pdig_context& main_ctx)
 {
-	int pid = -1; // tid?
-	// XXX can we get this otherwise?
-	char buf[256];
-	snprintf(buf, sizeof(buf), "/proc/%d/status", tid);
-
-	FILE* fp = fopen(buf, "rb");
-	if(!fp) {
-		return -1; // tid?
-	}
-
-	while(fgets(buf, sizeof(buf), fp) != NULL) {
-		if(sscanf(buf, "Tgid:\t%d", &pid) == 1) {
-			break;
+	// we received the initial SIGSTOP for a thread we know nothing about
+	// so it means we haven't received the clone event yet
+	DEBUG("hello early tid %d\n", tid);
+	main_ctx.procs.insert({
+		tid,
+		{
+			process_state::waiting_for_clone_event,
+			false,
+			0,
 		}
-	}
-
-	fclose(fp);
-	return pid;
+	});
+	// keep it paused until we receive the clone event
+	return true;
 }
 
-#define X32_SYSCALL_BIT 0x40000000
-#define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
-
-static struct sock_fprog* build_filter(bool capture_all)
+static bool handle_spawning(pid_t tid, pdig_process_context& pctx)
 {
-	size_t num_syscalls = 0;
-	uint32_t filtered_flags = EF_UNUSED;
-	if(!capture_all) {
-		filtered_flags |= EF_DROP_SIMPLE_CONS;
-	}
-
-	uint32_t instrumented_syscalls[SYSCALL_TABLE_SIZE] = {0};
-
-	for(size_t i=0; i<SYSCALL_TABLE_SIZE; ++i) {
-		uint32_t flags = g_syscall_table[i].flags;
-		if ((flags & (UF_USED | UF_ALWAYS_DROP)) != UF_USED) {
-			continue;
-		}
-
-		enum ppm_event_type enter_event = g_syscall_table[i].enter_event_type;
-		uint32_t enter_event_flags = g_event_info[enter_event].flags;
-		if ((enter_event_flags & filtered_flags) != 0 && (enter_event_flags & EF_MODIFIES_STATE) == 0) {
-			continue;
-		}
-
-		enum ppm_event_type exit_event = g_syscall_table[i].exit_event_type;
-		uint32_t exit_event_flags = g_event_info[exit_event].flags;
-		if ((exit_event_flags & filtered_flags) != 0 && (exit_event_flags & EF_MODIFIES_STATE) == 0) {
-			continue;
-		}
-
-		instrumented_syscalls[num_syscalls++] = i;
-
-		DEBUG("syscall#%zu flags %08x enter flags = %08x exit flags = %08x\n", i, g_syscall_table[i].flags, enter_event_flags, exit_event_flags);
-	}
-
-	struct sock_filter filter_header[] = {
-		// if arch != AUDIT_ARCH_X86_64 { return ERRNO | ENOSYS }
-		BPF_STMT(BPF_LD | BPF_W | BPF_ABS, (offsetof(struct seccomp_data, arch))),
-		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_X86_64, 1, 0),
-		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (ENOSYS & SECCOMP_RET_DATA)),
-
-		// if nr >= X32_SYSCALL_BIT { return ERRNO | ENOSYS }
-		BPF_STMT(BPF_LD | BPF_W | BPF_ABS, (offsetof(struct seccomp_data, nr))),
-		BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, X32_SYSCALL_BIT, 0, 1),
-		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (ENOSYS & SECCOMP_RET_DATA)),
-	};
-
-	struct sock_filter filter_footer[] = {
-		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRACE),
-	};
-
-	size_t filter_size = ARRAY_SIZE(filter_header) + num_syscalls + ARRAY_SIZE(filter_footer);
-	char* buf = (char*)calloc(sizeof(struct sock_fprog) + filter_size * sizeof(struct sock_filter), 1);
-	if(!buf) {
-		return NULL;
-	}
-
-	struct sock_filter* filter = (struct sock_filter*)(buf + sizeof(struct sock_fprog));
-	struct sock_fprog* prog = (struct sock_fprog*)buf;
-
-	memcpy(&filter[0], filter_header, sizeof(filter_header));
-	int insn = ARRAY_SIZE(filter_header);
-
-	for(size_t i = 0; i < num_syscalls; ++i) {
-		uint8_t jmp_off = num_syscalls - i;
-		filter[insn++] = BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, instrumented_syscalls[i], jmp_off, 0);
-	}
-
-	memcpy(&filter[insn], filter_footer, sizeof(filter_footer));
-
-	prog->len = (unsigned short)filter_size;
-	prog->filter = filter;
-	return prog;
+	EXPECT(ptrace(PTRACE_SETOPTIONS, tid, 0, ptrace_options(pctx.use_seccomp)));
+	DEBUG("hello tid %d (pid %d)\n", tid, pctx.pid);
+	return wait_for_next_syscall(tid, pctx);
 }
 
-static pid_t spawn(int argc, char** argv, bool capture_all)
+static bool handle_attaching(pid_t tid, pdig_process_context& pctx, pdig_context& main_ctx)
 {
-	struct sock_fprog* prog;
+	EXPECT(ptrace(PTRACE_SETOPTIONS, tid, 0, ptrace_options(pctx.use_seccomp)));
+	if(pctx.pid == 0) {
+		pctx.pid = inject_getpid(tid);
+		main_ctx.incomplete_mt_procs.emplace(pctx.pid, 10);
+	}
+
+	attach_all_threads(pctx.pid, main_ctx);
+
+	EXPECT(ptrace(PTRACE_SYSCALL, tid, NULL, NULL));
+
+	if(!pctx.use_seccomp) {
+		pctx.state = process_state::waiting_for_enter;
+	} else {
+		pctx.state = process_state::attaching_first_syscall_enter;
+	}
+
+	return true;
+}
+
+static bool handle_attaching_first_syscall_enter(pid_t tid, pdig_process_context& pctx)
+{
+	// TODO: we could want to instrument this syscall too
+	//       but we don't have the process id yet
+	//       (we can't inject getpid() until this syscall finishes)
+	EXPECT(ptrace(PTRACE_SYSCALL, tid, NULL, NULL));
+	pctx.state = process_state::attaching_first_syscall_exit;
+	return true;
+}
+
+static bool handle_attaching_first_syscall_exit(pid_t tid, pdig_process_context& pctx, pdig_context& main_ctx)
+{
+	struct user_regs_struct saved_regs;
+
+	EXPECT(ptrace(PTRACE_GETREGS, tid, &saved_regs, &saved_regs));
+
+	if (inject_prctl_set_no_new_privs(tid, saved_regs) != 0) {
+		pctx.use_seccomp = false;
+		EXPECT(ptrace(PTRACE_SETREGS, tid, &saved_regs, &saved_regs));
+		EXPECT(ptrace(PTRACE_SYSCALL, tid, NULL, NULL));
+		pctx.state = process_state::waiting_for_enter;
+		return true;
+	}
+
+	if (inject_seccomp_filter(tid, saved_regs, main_ctx.seccomp_filter) != 0) {
+		abort();
+	}
+
+	EXPECT(ptrace(PTRACE_SETREGS, tid, &saved_regs, &saved_regs));
+	EXPECT(ptrace(PTRACE_CONT, tid, NULL, NULL));
+	pctx.state = process_state::waiting_for_enter;
+
+	return true;
+}
+
+static bool handle_syscall_enter(pid_t tid, pdig_process_context& pctx)
+{
+	handle_syscall(tid, pctx, true);
+	EXPECT(ptrace(PTRACE_SYSCALL, tid, NULL, NULL));
+
+	pctx.state = process_state::waiting_for_exit;
+	return true;
+}
+
+static bool handle_syscall_exit(pid_t tid, pdig_process_context& pctx, pdig_context& main_ctx)
+{
+	handle_syscall(tid, pctx, false);
+	if(die && !pctx.use_seccomp) {
+		DEBUG("Detaching from tid %d\n", tid);
+		EXPECT(ptrace(PTRACE_DETACH, tid, 0, 0));
+		main_ctx.procs.erase(tid);
+		return true;
+	} else {
+		return wait_for_next_syscall(tid, pctx);
+	}
+}
+
+// event handlers
+
+static bool handle_signal(pid_t tid, int sig, pdig_context& main_ctx)
+{
+	auto proc = main_ctx.procs.find(tid);
+	if (proc == main_ctx.procs.end()) {
+		if (sig == SIGSTOP) {
+			return handle_early_sigstop(tid, main_ctx);
+		} else {
+			WARN("Got signal %04x for unknown tid %u", sig, tid);
+			return true;
+		}
+	} else {
+		DEBUG("Got signal %04x for tid %u in state %d\n", sig, tid, static_cast<int>(proc->second.state));
+	}
+
+	auto& pctx = proc->second;
+	switch(sig) {
+	case SIGSTOP:
+		switch(pctx.state) {
+		case process_state::spawning:
+			return handle_spawning(tid, pctx);
+
+		case process_state::attaching:
+			return handle_attaching(tid, pctx, main_ctx);
+
+		default:
+			return wait_for_next_syscall(tid, pctx);
+		}
+	case SIGTRAP | (PTRACE_EVENT_SECCOMP << 8):
+	case SIGTRAP | 0x80:
+		switch(pctx.state) {
+		case process_state::attaching_first_syscall_enter:
+			return handle_attaching_first_syscall_enter(tid, pctx);
+
+		case process_state::attaching_first_syscall_exit:
+			return handle_attaching_first_syscall_exit(tid, pctx, main_ctx);
+
+		case process_state::waiting_for_enter:
+			return handle_syscall_enter(tid, pctx);
+
+		case process_state::waiting_for_exit:
+			return handle_syscall_exit(tid, pctx, main_ctx);
+
+		default:
+			WARN("Got signal %04x for tid %u in state %d", sig, tid, static_cast<int>(pctx.state));
+			return true;
+	}
+	case SIGTRAP | (PTRACE_EVENT_EXEC << 8):
+		return handle_execve_exit(tid, pctx);
+	case SIGTRAP | (PTRACE_EVENT_EXIT << 8):
+		return handle_exit(tid, pctx);
+	case SIGTRAP | (PTRACE_EVENT_CLONE << 8):
+	case SIGTRAP | (PTRACE_EVENT_VFORK << 8):
+	case SIGTRAP | (PTRACE_EVENT_FORK << 8):
+		return handle_ptrace_clone_event(tid, pctx, main_ctx);
+	case SIGTRAP:
+		return wait_for_next_syscall(tid, pctx);
+	default:
+		if((sig & 0x3f) == SIGTRAP) {
+			WARN("Got unhandled signal %04x for tid %u in state %d", sig, tid, static_cast<int>(pctx.state));
+		}
+		return deliver_signal(tid, pctx, sig);
+	}
+}
+
+static bool handle_waitpid(pid_t tid, int status, pdig_context& main_ctx)
+{
+	set_pid(tid);
+
+	if(WIFEXITED(status)) {
+		DEBUG("tracee %d exited: %d\n", tid, WEXITSTATUS(status));
+		if(tid == main_ctx.mainpid) {
+			main_ctx.exitcode = WEXITSTATUS(status);
+		}
+		main_ctx.procs.erase(tid);
+	} else if(WIFSIGNALED(status)) {
+		DEBUG("tracee %d died with signal %d\n", tid, WTERMSIG(status));
+		if(tid == main_ctx.mainpid) {
+			main_ctx.exitcode = 128 + WTERMSIG(status);
+		}
+		main_ctx.procs.erase(tid);
+	} else if(WIFSTOPPED(status)) {
+		return handle_signal(tid, status >> 8, main_ctx);
+	} else {
+		WARN("Got unexpected waitpid status %08x for tid %u", status, tid);
+	}
+	return true;
+}
+
+
+
+static int spawn(int argc, char** argv, pdig_context& main_ctx)
+{
+	bool use_seccomp = main_ctx.seccomp_filter != nullptr;
 	pid_t pid = fork();
 	switch(pid) {
 		case 0: /* child */
 			DEBUG("child forked, pid = %d\n", getpid());
+			signal(SIGCHLD, SIG_DFL);
+			signal(SIGINT, SIG_DFL);
 			EXPECT(ptrace(PTRACE_TRACEME, 0, NULL, NULL));
 			DEBUG("PTRACE_TRACEME done\n");
-			EXPECT(prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0));
-			DEBUG("NO_NEW_PRIVS done\n");
 			EXPECT(raise(SIGSTOP));
-			prog = build_filter(capture_all);
-			EXPECT(prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, prog, 0, 0));
-			free(prog);
+			if(use_seccomp) {
+				EXPECT(prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0));
+				DEBUG("NO_NEW_PRIVS done\n");
+				EXPECT(prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, main_ctx.seccomp_filter, 0, 0));
+			}
+
 			DEBUG("child calling execve\n");
 			execvp(argv[0], argv);
 			DEBUG("child execve failed\n");
@@ -267,147 +407,16 @@ static pid_t spawn(int argc, char** argv, bool capture_all)
 			abort();
 	}
 
-	return pid;
-}
+	main_ctx.mainpid = pid;
+	main_ctx.procs.insert({
+		pid,
+		{
+			process_state::spawning,
+			use_seccomp,
+			pid,
+		}
+	});
 
-unsigned long copy_to_user(pid_t pid, void* from, void* to, unsigned long n)
-{
-	struct iovec local_iov[] = {{
-		.iov_base = from,
-		.iov_len = n,
-	}};
-	struct iovec remote_iov[] = {{
-		.iov_base = to,
-		.iov_len = n,
-	}};
-
-	if (process_vm_writev(pid, local_iov, 1, remote_iov, 1, 0) >= 0) {
-		return 0;
-	}
-
-	if(n % sizeof(long) != 0) {
-		abort();
-	}
-
-	unsigned long *ulfrom = (unsigned long*) from;
-	unsigned long *ulto = (unsigned long*) to;
-	for (unsigned long i = 0; i < n / sizeof(long); ++i) {
-		EXPECT(ptrace(PTRACE_POKETEXT, pid, (void*) ulto, *ulfrom));
-		ulfrom++;
-		ulto++;
-	}
-
-	return 0;
-}
-
-static int step(pid_t target)
-{
-	int status;
-
-	EXPECT(ptrace(PTRACE_SINGLESTEP, target, NULL, NULL));
-	EXPECT(waitpid(target, &status, WSTOPPED));
-
-	if(!WIFSTOPPED(status) || WSTOPSIG(status) != SIGTRAP) {
-		abort();
-	}
-	return 0;
-}
-
-static int attach(pid_t target, bool use_seccomp, bool capture_all)
-{
-	struct sock_fprog* prog = build_filter(capture_all);
-	struct user_regs_struct saved_regs;
-
-	set_pid(target);
-	EXPECT(ptrace(PTRACE_ATTACH, target, NULL, NULL));
-	EXPECT(waitpid(target, 0, WUNTRACED));
-	if(!use_seccomp) {
-		EXPECT(ptrace(PTRACE_SETOPTIONS, target, 0, (void*)(PTRACE_O_TRACESYSGOOD | PTRACE_O_EXITKILL | PTRACE_O_TRACEFORK | PTRACE_O_TRACECLONE | PTRACE_O_TRACEVFORK | PTRACE_O_TRACEEXEC | PTRACE_O_TRACEEXIT)));
-
-		EXPECT(ptrace(PTRACE_SYSCALL, target, NULL, NULL));
-		return 0;
-	}
-
-	EXPECT(ptrace(PTRACE_SETOPTIONS, target, 0, (void*)(PTRACE_O_TRACESYSGOOD | PTRACE_O_EXITKILL | PTRACE_O_TRACEFORK | PTRACE_O_TRACECLONE | PTRACE_O_TRACEVFORK | PTRACE_O_TRACEEXEC | PTRACE_O_TRACEEXIT | PTRACE_O_TRACESECCOMP)));
-
-	EXPECT(ptrace(PTRACE_GETREGS, target, &saved_regs, &saved_regs));
-
-	DEBUG("original rip = %016llx\n", saved_regs.rip);
-
-	uint8_t patch[] = {
-		0x0f, 0x05, // syscall (mmap)
-		0x0f, 0x05, // syscall (no_new_privs)
-		0x0f, 0x05, // syscall (seccomp)
-		0x0f, 0x05, // syscall (munmap)
-
-		0xff, 0xe0, // jmp %rax
-		0x66, 0x90, // nop
-		0x66, 0x90, // nop
-		0x66, 0x90, // nop
-	};
-	uint8_t saved_text[sizeof(patch)];
-
-	struct user_regs_struct new_regs = saved_regs;
-
-	EXPECT(ppm_copy_from_user(saved_text, (void*)saved_regs.rip, sizeof(saved_text)));
-	EXPECT(copy_to_user(target, patch, (void*)saved_regs.rip, sizeof(patch)));
-
-	new_regs.rax = __NR_mmap;
-	new_regs.rdi = 0; // addr
-	new_regs.rsi = PAGE_SIZE; // size
-	new_regs.rdx = PROT_READ | PROT_EXEC;
-	new_regs.r10 = MAP_PRIVATE | MAP_ANONYMOUS;
-	new_regs.r8 = -1; // fd
-	new_regs.r9 = 0; // offset
-	EXPECT(ptrace(PTRACE_SETREGS, target, &new_regs, &new_regs));
-	DEBUG("setting rip = %016llx\n", new_regs.rip);
-
-	EXPECT(step(target)); // syscall (mmap)
-	EXPECT(ptrace(PTRACE_GETREGS, target, &new_regs, &new_regs));
-	DEBUG("rip now = %016llx\n", new_regs.rip);
-	unsigned long mmapped = new_regs.rax;
-
-	unsigned long payload_len = sizeof(*prog) + prog->len * sizeof(prog->filter[0]);
-	prog->filter = (struct sock_filter*)(mmapped + sizeof(*prog));
-	DEBUG("mapped a page at %016lx, copying payload of %lu bytes\n", mmapped, payload_len);
-
-	DEBUG("filter is at %p\n", prog->filter);
-	EXPECT(copy_to_user(target, (void*)prog, (void*)mmapped, payload_len));
-	free(prog);
-
-	new_regs.rax = __NR_prctl;
-	new_regs.rdi = PR_SET_NO_NEW_PRIVS;
-	new_regs.rsi = 1;
-	new_regs.rdx = 0;
-	new_regs.r10 = 0;
-	new_regs.r8 = 0;
-	EXPECT(ptrace(PTRACE_SETREGS, target, &new_regs, &new_regs));
-	EXPECT(step(target)); // syscall (no_new_privs)
-
-	// EXPECT(prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog, 0, 0));
-	new_regs.rax = __NR_prctl;
-	new_regs.rdi = PR_SET_SECCOMP;
-	new_regs.rsi = SECCOMP_MODE_FILTER;
-	new_regs.rdx = mmapped;
-	new_regs.r10 = 0;
-	new_regs.r8 = 0;
-	EXPECT(ptrace(PTRACE_SETREGS, target, &new_regs, &new_regs));
-	EXPECT(step(target)); // syscall (seccomp)
-
-	new_regs.rax = __NR_munmap;
-	new_regs.rdi = mmapped;
-	new_regs.rsi = PAGE_SIZE;
-	EXPECT(ptrace(PTRACE_SETREGS, target, &new_regs, &new_regs));
-	EXPECT(step(target)); // syscall (munmap)
-
-	new_regs.rax = mmapped;
-	EXPECT(ptrace(PTRACE_SETREGS, target, &new_regs, &new_regs));
-	EXPECT(step(target)); // jmp %rax
-
-	EXPECT(ptrace(PTRACE_SETREGS, target, &saved_regs, &saved_regs));
-	EXPECT(copy_to_user(target, saved_text, (void*)saved_regs.rip, sizeof(saved_text)));
-
-	EXPECT(ptrace(PTRACE_CONT, target, NULL, NULL));
 	return 0;
 }
 
@@ -424,8 +433,6 @@ static void usage()
 );
 }
 
-static std::atomic<bool> die(false);
-
 void sigint(int _sig)
 {
 	if(!die) {
@@ -440,26 +447,32 @@ int main(int argc, char **argv)
 	pid_t pid = -1;
 	int exitcode = 0;
 	bool capture_all = false;
+	bool attach_proc_tree = false;
 	bool force_seccomp = false;
 	int op;
 	int long_index = 0;
-	__ptrace_request ptrace_default_op = PTRACE_CONT;
+	pdig_context main_ctx = {0};
 
 	static struct option long_options[] =
 	{
 		{"capture-all", no_argument, 0, 'a' },
 		{"pid", required_argument, 0, 'p' },
+		{"proc-tree", required_argument, 0, 'P' },
 		{"force-seccomp", no_argument, 0, 'S' },
 		{"help", no_argument, 0, 'h' }
 	};
 
-	while((op = getopt_long(argc, argv, "ap:Sh", long_options, &long_index)) != -1) {
+	while((op = getopt_long(argc, argv, "+ap:P:Sh", long_options, &long_index)) != -1) {
 		switch(op) {
 			case 'a':
 				capture_all = true;
 				break;
 			case 'p':
 				pid = atoi(optarg);
+				break;
+			case 'P':
+				pid = atoi(optarg);
+				attach_proc_tree = true;
 				break;
 			case 'S':
 				force_seccomp = true;
@@ -475,24 +488,34 @@ int main(int argc, char **argv)
 	signal(SIGCHLD, ignore_sig);
 	signal(SIGINT, sigint);
 
+	if(force_seccomp || pid == -1)
+	{
+		main_ctx.seccomp_filter = build_filter(capture_all);
+	}
+
 	if(pid != -1)
 	{
-		EXPECT(attach(pid, force_seccomp, capture_all));
-		if(!force_seccomp) {
-			ptrace_default_op = PTRACE_SYSCALL;
-		}
+		EXPECT(attach_thread(pid, 0, main_ctx));
 	}
 	else
 	{
-		pid = spawn(argc - optind, argv + optind, capture_all);
+		EXPECT(spawn(argc - optind, argv + optind, main_ctx));
 	}
 
-	pid_t mainpid = pid;
+	if(attach_proc_tree) {
+		main_ctx.full_proc_scans_remaining = 10;
+	}
 
 	EXPECT(pdig_init_shm());
 	DEBUG("parent pid = %d\n", getpid());
 
+	main_ctx.need_more_scans = true;
+
 	do {
+		if(!schedule_next_proc_scan_if_needed(main_ctx)) {
+			continue;
+		}
+
 		int status;
 		DEBUG("parent calling waitpid()\n");
 		pid = waitpid(-1, &status, WUNTRACED);
@@ -502,95 +525,10 @@ int main(int argc, char **argv)
 			break;
 		}
 		EXPECT(pid);
-		set_pid(pid);
+		handle_waitpid(pid, status, main_ctx);
+	} while(!main_ctx.procs.empty());
 
-		if(WIFEXITED(status)) {
-			DEBUG("tracee exited: %d\n", WEXITSTATUS(status));
-			if(pid == mainpid) {
-				exitcode = WEXITSTATUS(status);
-			}
-			procs.erase(pid);
-		} else if(WIFSIGNALED(status)) {
-			DEBUG("tracee died with signal %d\n", WTERMSIG(status));
-			if(pid == mainpid) {
-				exitcode = 128 + WTERMSIG(status);
-			}
-			procs.erase(pid);
-		} else if(WIFSTOPPED(status)) {
-			__ptrace_request ptrace_op = ptrace_default_op;
-			int sig = status >> 8;
-			pdig_process_context& pctx = procs[pid];
-			DEBUG("waitpid(-1) = %d, status = %04x, errno = %d\n", pid, status, errno);
-
-			switch(sig) {
-				case SIGSTOP:
-					DEBUG("pid=%d hello, saw stop=%d\n", pid, pctx.saw_initial_sigstop);
-					if(!pctx.saw_initial_sigstop) {
-						pctx.saw_initial_sigstop = true;
-						pctx.pid = get_pid(pid);
-						DEBUG("SIGSTOP hello tid %d pid %d\n", pid, pctx.pid);
-						EXPECT(ptrace(PTRACE_SETOPTIONS, pid, 0, (void*)(PTRACE_O_TRACESYSGOOD | PTRACE_O_EXITKILL | PTRACE_O_TRACEFORK | PTRACE_O_TRACECLONE | PTRACE_O_TRACEVFORK | PTRACE_O_TRACEEXEC | PTRACE_O_TRACEEXIT | PTRACE_O_TRACESECCOMP)));
-						handle_clone_exit(pid, pctx);
-						sig = 0;
-					}
-					break;
-				case SIGTRAP | (PTRACE_EVENT_SECCOMP << 8):
-					DEBUG("seccomp, tid = %d, pid = %d\n", pid, pctx.pid);
-					handle_syscall(pid, pctx, true);
-					pctx.syscall_enter = false;
-					ptrace_op = PTRACE_SYSCALL; // trap the exit event
-					sig = 0;
-					break;
-				case SIGTRAP | (PTRACE_EVENT_EXEC << 8):
-					DEBUG("execve exit, tid = %d, pid = %d\n", pid, pctx.pid);
-					handle_execve_exit(pid);
-					sig = 0;
-					break;
-				case SIGTRAP | (PTRACE_EVENT_EXIT << 8):
-					DEBUG("exit, tid = %d, pid = %d\n", pid, pctx.pid);
-					record_procexit_event(pid, pctx.pid);
-					sig = 0;
-					break;
-				case SIGTRAP | (PTRACE_EVENT_CLONE << 8): // is clone guaranteed to stay within the same tgid?
-				case SIGTRAP | (PTRACE_EVENT_VFORK << 8):
-				case SIGTRAP | (PTRACE_EVENT_FORK << 8):
-					DEBUG("SIGTRAP clone exit, tid = %d, pid = %d\n", pid, pctx.pid);
-					handle_ptrace_clone_event(pid);
-					sig = 0;
-					break;
-				case SIGTRAP:
-					sig = 0;
-					break;
-				case SIGTRAP | 0x80:
-					sig = 0;
-					handle_syscall(pid, pctx, pctx.syscall_enter);
-					pctx.syscall_enter = !pctx.syscall_enter;
-					if(die && ptrace_default_op == PTRACE_SYSCALL) {
-						if(pctx.syscall_enter) {
-							fprintf(stderr, "detaching from pid %d\n", pid);
-							EXPECT(ptrace(PTRACE_DETACH, pid, 0, 0));
-							procs.erase(pid);
-							continue;
-						} else {
-							fprintf(stderr, "pid %d in the middle of a syscall, not detaching yet\n", pid);
-						}
-					}
-					break;
-				default:
-					if((sig & 0x3f) == SIGTRAP) {
-						DEBUG("pid=%d unhandled SIGTRAP, status = %08x\n", pid, status);
-						sig = 0;
-					}
-					break;
-			}
-			if(ptrace(ptrace_op, pid, 0, sig) < 0) {
-				WARN("ptrace(%d, %d, 0, %d) failed", ptrace_op, pid, sig);
-			}
-		} else {
-			DEBUG("pid=%d unhandled status = %08x\n", pid, status);
-		}
-	} while(!procs.empty());
-
+	free(main_ctx.seccomp_filter);
 	return exitcode;
 }
 

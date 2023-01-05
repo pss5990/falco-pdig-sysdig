@@ -69,6 +69,7 @@ const struct ppm_name_value file_flags[] = {
 	{"O_RDONLY", PPM_O_RDONLY},
 	{"O_CLOEXEC", PPM_O_CLOEXEC},
 	{"O_NONE", PPM_O_NONE},
+	{"O_TMPFILE", PPM_O_TMPFILE},
 	{0, 0},
 };
 
@@ -516,4 +517,11 @@ const struct ppm_name_value chmod_mode[] = {
     {"S_ISGID", PPM_S_ISGID},
     {"S_ISUID", PPM_S_ISUID},
     {0, 0},
+};
+
+const struct ppm_name_value renameat2_flags[] = {
+	{"RENAME_NOREPLACE", PPM_RENAME_NOREPLACE},
+	{"RENAME_EXCHANGE", PPM_RENAME_EXCHANGE},
+	{"RENAME_WHITEOUT", PPM_RENAME_WHITEOUT},
+	{0, 0},
 };

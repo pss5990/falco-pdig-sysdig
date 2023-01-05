@@ -30,6 +30,9 @@ limitations under the License.
 
 #include <sinsp.h>
 #include "chisel.h"
+#ifdef HAS_CAPTURE
+#include "driver_config.h"
+#endif // HAS_CAPTURE
 #include "sysdig.h"
 #include "table.h"
 #include "utils.h"
@@ -236,8 +239,8 @@ static void print_views(sinsp_view_manager* view_manager)
 		root.append(jv);
 	}
 
-	string ouput = writer.write(root);
-	printf("%s", ouput.substr(0, ouput.size() - 1).c_str());
+	string output = writer.write(root);
+	printf("%s", output.substr(0, output.size() - 1).c_str());
 }
 #endif
 

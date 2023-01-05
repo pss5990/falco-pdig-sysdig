@@ -98,6 +98,7 @@ or GPL2.txt for full copies of the license.
 #define PPM_O_DIRECTORY (1 << 10)
 #define PPM_O_LARGEFILE (1 << 11)
 #define PPM_O_CLOEXEC	(1 << 12)
+#define PPM_O_TMPFILE	(1 << 13)
 
 /*
  * File modes
@@ -584,6 +585,14 @@ or GPL2.txt for full copies of the license.
 #define PPM_PF_RESERVED_PAGE		(1 << 6)
 #define PPM_PF_INSTRUCTION_FETCH	(1 << 7)
 
+
+/*
+ * Rename flags
+ */
+#define PPM_RENAME_NOREPLACE	(1 << 0)	/* Don't overwrite target */
+#define PPM_RENAME_EXCHANGE		(1 << 1)	/* Exchange source and dest */
+#define PPM_RENAME_WHITEOUT		(1 << 2)	/* Whiteout source */
+
 /*
  * SuS says limits have to be unsigned.
  * Which makes a ton more sense anyway.
@@ -946,7 +955,9 @@ enum ppm_event_type {
 	PPME_SYSCALL_CHMOD_X = 315,
 	PPME_SYSCALL_FCHMOD_E = 316,
 	PPME_SYSCALL_FCHMOD_X = 317,
-	PPM_EVENT_MAX = 318
+	PPME_SYSCALL_RENAMEAT2_E = 318,
+	PPME_SYSCALL_RENAMEAT2_X = 319,
+	PPM_EVENT_MAX = 320
 };
 /*@}*/
 
@@ -1274,7 +1285,8 @@ enum ppm_syscall_code {
 	PPM_SC_SIGALTSTACK = 317,
 	PPM_SC_GETRANDOM = 318,
 	PPM_SC_FADVISE64 = 319,
-	PPM_SC_MAX = 320,
+	PPM_SC_RENAMEAT2 = 320,
+	PPM_SC_MAX = 321,
 };
 
 /*
@@ -1365,7 +1377,8 @@ enum ppm_param_type {
 	PT_IPADDR = 40,  /* Either an IPv4 or IPv6 address. The length indicates which one it is. */
 	PT_IPNET = 41,  /* Either an IPv4 or IPv6 network. The length indicates which one it is. */
 	PT_MODE = 42, /* a 32 bit bitmask to represent file modes. */
-	PT_MAX = 43 /* array size */
+	PT_FSRELPATH = 43, /* A path relative to a dirfd. */
+	PT_MAX = 44 /* array size */
 };
 
 enum ppm_print_format {
@@ -1386,6 +1399,8 @@ struct ppm_name_value {
 	uint32_t value;
 };
 
+#define DIRFD_PARAM(_param_num) ((void*)_param_num)
+
 /*!
   \brief Event parameter information.
 */
@@ -1394,7 +1409,8 @@ struct ppm_param_info {
 	enum ppm_param_type type; /**< Parameter type, e.g. 'uint16', 'string'... */
 	enum ppm_print_format fmt; /**< If this is a numeric parameter, this flag specifies if it should be rendered as decimal or hex. */
 	const void *info; /**< If this is a flags parameter, it points to an array of ppm_name_value,
-			       else if this is a dynamic parameter it points to an array of ppm_param_info */
+						   if this is a FSRELPATH parameter, it references the related dirfd,
+					   else if this is a dynamic parameter it points to an array of ppm_param_info */
 	uint8_t ninfo; /**< Number of entry in the info array. */
 } _packed;
 
@@ -1496,6 +1512,7 @@ extern const struct ppm_name_value pf_flags[];
 extern const struct ppm_name_value unlinkat_flags[];
 extern const struct ppm_name_value linkat_flags[];
 extern const struct ppm_name_value chmod_mode[];
+extern const struct ppm_name_value renameat2_flags[];
 
 extern const struct ppm_param_info sockopt_dynamic_param[];
 extern const struct ppm_param_info ptrace_dynamic_param[];
@@ -1604,5 +1621,27 @@ struct ppm_event_entry {
 #define RW_SNAPLEN 80
 #define RW_MAX_SNAPLEN PPM_MAX_ARG_SIZE
 #define RW_MAX_FULLCAPTURE_PORT_SNAPLEN 16000
+
+/*
+ * Udig stuff
+ */
+struct udig_consumer_t {
+	uint32_t snaplen;
+	uint32_t sampling_ratio;
+	bool do_dynamic_snaplen;
+	uint32_t sampling_interval;
+	int is_dropping;
+	int dropping_mode;
+	volatile int need_to_insert_drop_e;
+	volatile int need_to_insert_drop_x;
+	uint16_t fullcapture_port_range_start;
+	uint16_t fullcapture_port_range_end;
+	uint16_t statsd_port;
+};
+#ifdef UDIG
+typedef struct udig_consumer_t ppm_consumer_t;
+#else
+typedef struct ppm_consumer_t ppm_consumer_t;
+#endif /* UDIG */
 
 #endif /* EVENTS_PUBLIC_H_ */

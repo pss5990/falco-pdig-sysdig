@@ -16,7 +16,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 */
-
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -27,6 +26,7 @@ limitations under the License.
 #include <sys/types.h>
 #include <fcntl.h>
 #include "uthash.h"
+#include "compat/misc.h"
 #ifdef _WIN32
 #include <Ws2tcpip.h>
 #elif defined(__APPLE__)
@@ -776,6 +776,9 @@ static inline uint32_t open_flags_to_scap(unsigned long flags)
 
 	if (flags & O_CREAT)
 		res |= PPM_O_CREAT;
+	
+	if (flags & O_TMPFILE)
+		res |= PPM_O_TMPFILE;
 
 	if (flags & O_APPEND)
 		res |= PPM_O_APPEND;
@@ -820,7 +823,7 @@ static inline uint32_t open_flags_to_scap(unsigned long flags)
 	return res;
 }
 
-static uint32_t scap_get_device_by_mount_id(scap_t *handle, const char *procdir, unsigned long requested_mount_id)
+uint32_t scap_get_device_by_mount_id(scap_t *handle, const char *procdir, unsigned long requested_mount_id)
 {
 	char fd_dir_name[SCAP_MAX_PATH_SIZE];
 	char line[SCAP_MAX_PATH_SIZE];
@@ -883,6 +886,8 @@ void scap_fd_flags_file(scap_t *handle, scap_fdinfo *fdi, const char *procdir)
 	{
 		return;
 	}
+	fdi->info.regularinfo.mount_id = 0;
+	fdi->info.regularinfo.dev = 0;
 
 	while(fgets(line, sizeof(line), finfo) != NULL)
 	{
@@ -912,20 +917,13 @@ void scap_fd_flags_file(scap_t *handle, scap_fdinfo *fdi, const char *procdir)
 		}
 		else if(!strncmp(line, "mnt_id:\t", sizeof("mnt_id:\t") - 1))
 		{
-			uint32_t dev;
 			errno = 0;
 			unsigned long mount_id = strtoul(line + sizeof("mnt_id:\t") - 1, NULL, 10);
 
-			if(errno == ERANGE)
+			if(errno != ERANGE)
 			{
-				dev = 0;
+				fdi->info.regularinfo.mount_id = mount_id;
 			}
-			else
-			{
-				dev = scap_get_device_by_mount_id(handle, procdir, mount_id);
-			}
-
-			fdi->info.regularinfo.dev = dev;
 		}
 	}
 

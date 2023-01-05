@@ -84,6 +84,7 @@ int scap_dump_writev(scap_dumper_t *d, const struct iovec *iov, int iovcnt)
 	return totlen;
 }
 
+#ifdef USE_ZLIB
 int32_t compr(uint8_t* dest, uint64_t* destlen, const uint8_t* source, uint64_t sourcelen, int level)
 {
 	uLongf dl = compressBound(sourcelen);
@@ -104,6 +105,7 @@ int32_t compr(uint8_t* dest, uint64_t* destlen, const uint8_t* source, uint64_t 
 		return SCAP_FAILURE;
 	}
 }
+#endif
 
 uint8_t* scap_get_memorydumper_curpos(scap_dumper_t *d)
 {
@@ -1028,7 +1030,7 @@ scap_dumper_t *scap_memory_dump_open(scap_t *handle, uint8_t* targetbuf, uint64_
 	//
 	// Disable proc parsing since it would be too heavy when saving to memory.
 	// Before doing that, backup handle->refresh_proc_table_when_saving so we can
-	// restore whatever the current seetting is as soon as we're done.
+	// restore whatever the current setting is as soon as we're done.
 	//
 	bool tmp_refresh_proc_table_when_saving = handle->refresh_proc_table_when_saving;
 	handle->refresh_proc_table_when_saving = false;
@@ -2632,7 +2634,7 @@ int32_t scap_read_init(scap_t *handle, gzFile f)
 			break;
 		default:
 			//
-			// Unknwon block type. Skip the block.
+			// Unknown block type. Skip the block.
 			//
 			toread = bh.block_total_length - sizeof(block_header) - 4;
 			fseekres = (int)gzseek(f, (long)toread, SEEK_CUR);

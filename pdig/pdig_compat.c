@@ -9,6 +9,7 @@
 #include <sys/ptrace.h>
 #include <sys/user.h>
 #include <syscall.h>
+#include <sys/signal.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <time.h>
@@ -17,14 +18,18 @@
 #include <limits.h>
 #include <sys/socket.h>
 #include <netinet/ip.h>
-
-#include <arpa/inet.h> // dbg
+#include <sys/wait.h>
 
 #include "udig_capture.h"
 #include "udig_inf.h"
-#include "pdig.h"
 #include "scap.h"
 #include "ppm_ringbuffer.h"
+
+#include "pdig_ptrace.h"
+
+#ifndef MIN
+#define MIN(X,Y) ((X) < (Y)? (X):(Y))
+#endif
 
 extern const struct ppm_event_info g_event_info[];
 extern const struct syscall_evt_pair g_syscall_table[];
@@ -58,31 +63,6 @@ int pdig_init_shm()
 	return 0;
 }
 
-void cwrite(char* str)
-{
-	write(2, str, strlen(str));
-}
-
-int cprintf(const char* format, ...)
-{
-	va_list args;
-	va_start(args, format);
-	int res = vsnprintf(g_console_print_buf, 
-		sizeof(g_console_print_buf) - 1, 
-		format, 
-		args);
-	va_end(args);
-
-	cwrite(g_console_print_buf);
-
-	return res;
-}
-
-uint8_t* patch_pointer(uint8_t* pointer)
-{
-	return pointer;
-}
-
 size_t strlcpy(char *dst, const char *src, size_t size)
 {
     const size_t srclen = strlen(src);
@@ -102,10 +82,11 @@ void set_pid(pid_t pid)
 	the_pid = pid;
 }
 
-static __inline__ uint64_t ctx_getpid(uint64_t* context)
+static bool is_enter;
+
+static void set_direction(bool enter)
 {
-	uint64_t res = context[CTX_PID_TID];
-	return res >> 32;
+	is_enter = enter;
 }
 
 static __inline__ uint64_t ctx_gettid(uint64_t* context)
@@ -124,56 +105,14 @@ static __inline__ int ud_clock_gettime(clockid_t clk_id, struct timespec *tp)
 	return syscall(__NR_clock_gettime, clk_id, tp);
 }
 
-static inline void* page_align(void* ptr)
-{
-	uintptr_t aligned = ((uintptr_t)ptr & ~(PAGE_SIZE - 1));
-	return (void*)aligned;
-}
-
-static inline void* next_page(void* ptr)
-{
-	uintptr_t aligned = ((uintptr_t)ptr & ~(PAGE_SIZE - 1)) + PAGE_SIZE;
-	return (void*)aligned;
-}
-
-unsigned long ppm_copy_from_user_impl(pid_t pid, void* to, void* from, unsigned long n)
-{
-	struct iovec local_iov[] = {{
-		.iov_base = to,
-		.iov_len = n,
-	}};
-
-	int first_page = ((uintptr_t)from) / PAGE_SIZE;
-	int last_page = ((uintptr_t)from + n) / PAGE_SIZE;
-	int npages = last_page - first_page + 1;
-
-	struct iovec remote_iov[npages];
-	void *ptr = from;
-	unsigned long to_read = n;
-
-	for(int p = 0; p < npages; ++p)
-	{
-		void* next_ptr = next_page(ptr);
-
-		unsigned long chunk = MIN(to_read, next_ptr - ptr);
-		remote_iov[p].iov_base = ptr;
-		remote_iov[p].iov_len = chunk;
-
-		to_read -= chunk;
-		ptr = next_ptr;
-	}
-	int ret = n - process_vm_readv(pid, local_iov, 1, remote_iov, npages, 0);
-	return ret;
-}
-
 unsigned long ppm_copy_from_user(void* to, const void* from, unsigned long n)
 {
-	return ppm_copy_from_user_impl(the_pid, to, (void*)from, n);
+	return copy_from_user(the_pid, to, (void*)from, n);
 }
 
 long ppm_strncpy_from_user_impl(pid_t pid, char* to, char* from, unsigned long n)
 {
-	int ret = ppm_copy_from_user_impl(pid, to, from, n);
+	int ret = copy_from_user(pid, to, from, n);
 	if (ret < 0) {
 		return ret;
 	}
@@ -528,6 +467,8 @@ void on_syscall(uint64_t* context, bool is_enter)
 #endif
 	}
 
+	set_direction(is_enter);
+
 	//
 	// Get ready for record_event
 	//
@@ -590,7 +531,7 @@ void on_syscall(uint64_t* context, bool is_enter)
 	}
 	else
 	{
-		cprintf("invalid table index %lu (tid: %d)\n", table_index, ctx_gettid(context));
+		cprintf("invalid table index %lu (tid: %lu)\n", table_index, ctx_gettid(context));
 		ASSERT(false);
 	}
 
@@ -599,121 +540,18 @@ void on_syscall(uint64_t* context, bool is_enter)
 #endif
 }
 
-static unsigned long long get_fd_inode(pid_t pid, int fd)
-{
-	char buf[PATH_MAX];
-	unsigned long long inode;
-	snprintf(buf, sizeof(buf), "/proc/%d/fd/%d", pid, fd);
-	if (readlink(buf, buf, sizeof(buf)) < 0) {
-		return -1;
-	}
-
-	if(sscanf(buf, "socket:[%llu]", &inode) != 1) {
-		return -1;
-	}
-
-	return inode;
-}
-
-static int get_sock_addr_impl(const char* path, unsigned long long inode, struct sockaddr *sa, socklen_t *sa_len, int family, bool remote)
-{
-	char buf[PATH_MAX];
-	unsigned int ipv6[4];
-	unsigned int ipv4;
-	unsigned short port;
-	unsigned long long sock_ino;
-	int ret = -1;
-
-	FILE* fp = fopen(path, "rb");
-	if(!fp) {
-		return -1;
-	}
-
-	while(fgets(buf, sizeof(buf), fp) != NULL) {
-		if(family == AF_INET) {
-			if(!remote) {
-				ret = sscanf(buf, " %*d: %08x:%04hx %*08x:%*04x %*02x %*08x:%*08x %*02x:%*08x %*08x %*d %*d %llu", &ipv4, &port, &sock_ino);
-			} else {
-				ret = sscanf(buf, " %*d: %*08x:%*04x %08x:%04hx %*02x %*08x:%*08x %*02x:%*08x %*08x %*d %*d %llu", &ipv4, &port, &sock_ino);
-			}
-			if (ret != 3 || sock_ino != inode) {
-				ret = -1;
-				continue;
-			}
-
-			struct sockaddr_in *sa_in = (struct sockaddr_in*)sa;
-			*sa_len = sizeof(*sa_in);
-			sa_in->sin_family = family;
-			sa_in->sin_port = htons(port);
-			sa_in->sin_addr.s_addr = ipv4;
-			ret = 0;
-
-			break;
-		} else if(family == AF_INET6) {
-			if(!remote) {
-				ret = sscanf(buf, " %*d: %08x%08x%08x%08x:%04hx %*032x:%*04x %*02x %*08x:%*08x %*02x:%*08x %*08x %*d %*d %llu", &ipv6[0], &ipv6[1], &ipv6[2], &ipv6[3], &port, &sock_ino);
-			} else {
-				ret = sscanf(buf, " %*d: %*032x:%*04x %08x%08x%08x%08x:%04hx %*02x %*08x:%*08x %*02x:%*08x %*08x %*d %*d %llu", &ipv6[0], &ipv6[1], &ipv6[2], &ipv6[3], &port, &sock_ino);
-			}
-			if (ret != 6 || sock_ino != inode) {
-				ret = -1;
-				continue;
-			}
-
-			struct sockaddr_in6 *sa_in = (struct sockaddr_in6*)sa;
-			*sa_len = sizeof(*sa_in);
-			sa_in->sin6_family = family;
-			sa_in->sin6_port = htons(port);
-			sa_in->sin6_flowinfo = 0; // ?
-			sa_in->sin6_scope_id = 0; // ?
-			memcpy(sa_in->sin6_addr.s6_addr, ipv6, 16);
-			ret = 0;
-
-			break;
-		} else {
-			return -1;
-		}
-	}
-
-	fclose(fp);
-	return ret;
-}
-
-static int get_sock_addr(unsigned long long inode, struct sockaddr *sa, socklen_t *sa_len, bool remote)
-{
-	int ret;
-	ret = get_sock_addr_impl("/proc/net/tcp", inode, sa, sa_len, AF_INET, remote);
-	if (ret == 0) return ret;
-
-	ret = get_sock_addr_impl("/proc/net/udp", inode, sa, sa_len, AF_INET, remote);
-	if (ret == 0) return ret;
-
-	ret = get_sock_addr_impl("/proc/net/tcp6", inode, sa, sa_len, AF_INET6, remote);
-	if (ret == 0) return ret;
-
-	ret = get_sock_addr_impl("/proc/net/udp6", inode, sa, sa_len, AF_INET6, remote);
-	if (ret == 0) return ret;
-
-	memset(sa, 0, *sa_len);
-
-	return -1;
-}
-
-// TODO these should be probably cached, or, at the very least, get the socket/peer address at once
-//      without parsing all the files twice
 int udig_getsockname(int fd, struct sockaddr *sock_address, socklen_t *alen)
 {
-	long long inode = get_fd_inode(the_pid, fd);
-	if (inode < 0) { return -1; }
+	// can't call a syscall in the middle of another one :(
+	if(is_enter) { return -1; }
 
-	return get_sock_addr(inode, sock_address, alen, false);
+	return inject_getXXXXname(the_pid, fd, sock_address, alen, __NR_getsockname);
 }
 
 int udig_getpeername(int fd, struct sockaddr *sock_address, socklen_t *alen)
 {
-	long long inode = get_fd_inode(the_pid, fd);
-	if (inode < 0) { return -1; }
+	// can't call a syscall in the middle of another one :(
+	if(is_enter) { return -1; }
 
-	return get_sock_addr(inode, sock_address, alen, true);
+	return inject_getXXXXname(the_pid, fd, sock_address, alen, __NR_getpeername);
 }
-
