@@ -18,6 +18,7 @@ limitations under the License.
 */
 
 #pragma once
+#include <bits/alltypes.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -199,6 +200,7 @@ typedef struct scap_fdinfo
 		{
 			uint32_t open_flags; ///< Flags associated with the file
 			char fname[SCAP_MAX_PATH_SIZE]; ///< Name associated to this file
+			uint32_t mount_id; ///< The id of the vfs mount the file is in until we find dev major:minor
 			uint32_t dev; ///< Major/minor number of the device containing this file
 		} regularinfo; ///< Information specific to regular files
 		char fname[SCAP_MAX_PATH_SIZE];  ///< The name for file system FDs
@@ -283,7 +285,7 @@ typedef enum {
 	 * Do not read system call data. If next is called, a dummy event is
 	 * returned.
 	 */
-	SCAP_MODE_NODRIVER
+	SCAP_MODE_NODRIVER,
 } scap_mode_t;
 
 typedef struct scap_open_args
@@ -300,11 +302,12 @@ typedef struct scap_open_args
 	                                                         // events should be returned, with a trailing NULL value.
 	                                                         // You can provide additional comm
 	                                                         // values via scap_suppress_events_comm().
+	bool udig; ///< If true, UDIG will be used for event capture. Otherwise, the kernel driver will be used.
 }scap_open_args;
 
 
 //
-// The follwing stuff is byte aligned because we save it to disk.
+// The following stuff is byte aligned because we save it to disk.
 //
 #if defined _MSC_VER
 #pragma pack(push)
@@ -521,6 +524,34 @@ struct ppm_syscall_desc {
 #define IN
 #define OUT
 
+//
+// udig stuff
+//
+#define UDIG_RING_SM_FNAME "udig_buf"
+#define UDIG_RING_DESCS_SM_FNAME "udig_descs"
+#define UDIG_RING_SIZE (8 * 1024 * 1024)
+
+#ifndef __APPLE__
+struct udig_ring_buffer_status {
+	volatile uint64_t m_buffer_lock;
+	volatile int m_initialized;
+	volatile int m_capturing_pid;
+	volatile int m_stopped;
+	volatile struct timespec m_last_print_time;
+	struct udig_consumer_t m_consumer;
+};
+#endif // __APPLE__
+
+typedef struct ppm_ring_buffer_info ppm_ring_buffer_info;
+
+int32_t udig_alloc_ring(int* ring_fd, uint8_t** ring, uint32_t *ringsize, char *error);
+int32_t udig_alloc_ring_descriptors(int* ring_descs_fd, 
+	struct ppm_ring_buffer_info** ring_info, 
+	struct udig_ring_buffer_status** ring_status, 
+	char *error);
+void udig_free_ring(uint8_t* addr, uint32_t size);
+void udig_free_ring_descriptors(uint8_t* addr);
+
 ///////////////////////////////////////////////////////////////////////////////
 // API functions
 ///////////////////////////////////////////////////////////////////////////////
@@ -570,7 +601,7 @@ scap_t* scap_open_offline_fd(int fd, char *error, int32_t *rc);
 /*!
   \brief Advanced function to start a capture.
 
-  \param args a \ref scap_open_args structure containing the open paraneters.
+  \param args a \ref scap_open_args structure containing the open parameters.
   \param error Pointer to a buffer that will contain the error string in case the
     function fails. The buffer must have size SCAP_LASTERR_SIZE.
   \param rc Integer pointer that will contain the scap return code in case the
@@ -1017,7 +1048,9 @@ uint64_t scap_get_unexpected_block_readsize(scap_t* handle);
 int32_t scap_proc_add(scap_t* handle, uint64_t tid, scap_threadinfo* tinfo);
 int32_t scap_fd_add(scap_t *handle, scap_threadinfo* tinfo, uint64_t fd, scap_fdinfo* fdinfo);
 scap_dumper_t *scap_memory_dump_open(scap_t *handle, uint8_t* targetbuf, uint64_t targetbufsize);
+#ifdef USE_ZLIB
 int32_t compr(uint8_t* dest, uint64_t* destlen, const uint8_t* source, uint64_t sourcelen, int level);
+#endif
 uint8_t* scap_get_memorydumper_curpos(scap_dumper_t *d);
 int32_t scap_write_proc_fds(scap_t *handle, struct scap_threadinfo *tinfo, scap_dumper_t *d);
 int32_t scap_write_proclist_header(scap_t *handle, scap_dumper_t *d, uint32_t totlen);

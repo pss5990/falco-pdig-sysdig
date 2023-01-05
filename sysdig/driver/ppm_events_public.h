@@ -98,6 +98,7 @@ or GPL2.txt for full copies of the license.
 #define PPM_O_DIRECTORY (1 << 10)
 #define PPM_O_LARGEFILE (1 << 11)
 #define PPM_O_CLOEXEC	(1 << 12)
+#define PPM_O_TMPFILE	(1 << 13)
 
 /*
  * File modes
@@ -584,6 +585,14 @@ or GPL2.txt for full copies of the license.
 #define PPM_PF_RESERVED_PAGE		(1 << 6)
 #define PPM_PF_INSTRUCTION_FETCH	(1 << 7)
 
+
+/*
+ * Rename flags
+ */
+#define PPM_RENAME_NOREPLACE	(1 << 0)	/* Don't overwrite target */
+#define PPM_RENAME_EXCHANGE		(1 << 1)	/* Exchange source and dest */
+#define PPM_RENAME_WHITEOUT		(1 << 2)	/* Whiteout source */
+
 /*
  * SuS says limits have to be unsigned.
  * Which makes a ton more sense anyway.
@@ -946,7 +955,9 @@ enum ppm_event_type {
 	PPME_SYSCALL_CHMOD_X = 315,
 	PPME_SYSCALL_FCHMOD_E = 316,
 	PPME_SYSCALL_FCHMOD_X = 317,
-	PPM_EVENT_MAX = 318
+	PPME_SYSCALL_RENAMEAT2_E = 318,
+	PPME_SYSCALL_RENAMEAT2_X = 319,
+	PPM_EVENT_MAX = 320
 };
 /*@}*/
 
@@ -1274,7 +1285,8 @@ enum ppm_syscall_code {
 	PPM_SC_SIGALTSTACK = 317,
 	PPM_SC_GETRANDOM = 318,
 	PPM_SC_FADVISE64 = 319,
-	PPM_SC_MAX = 320,
+	PPM_SC_RENAMEAT2 = 320,
+	PPM_SC_MAX = 321,
 };
 
 /*
@@ -1496,6 +1508,7 @@ extern const struct ppm_name_value pf_flags[];
 extern const struct ppm_name_value unlinkat_flags[];
 extern const struct ppm_name_value linkat_flags[];
 extern const struct ppm_name_value chmod_mode[];
+extern const struct ppm_name_value renameat2_flags[];
 
 extern const struct ppm_param_info sockopt_dynamic_param[];
 extern const struct ppm_param_info ptrace_dynamic_param[];
@@ -1604,5 +1617,27 @@ struct ppm_event_entry {
 #define RW_SNAPLEN 80
 #define RW_MAX_SNAPLEN PPM_MAX_ARG_SIZE
 #define RW_MAX_FULLCAPTURE_PORT_SNAPLEN 16000
+
+/*
+ * Udig stuff
+ */
+struct udig_consumer_t {
+	uint32_t snaplen;
+	uint32_t sampling_ratio;
+	bool do_dynamic_snaplen;
+	uint32_t sampling_interval;
+	int is_dropping;
+	int dropping_mode;
+	volatile int need_to_insert_drop_e;
+	volatile int need_to_insert_drop_x;
+	uint16_t fullcapture_port_range_start;
+	uint16_t fullcapture_port_range_end;
+	uint16_t statsd_port;
+};
+#ifdef UDIG
+typedef struct udig_consumer_t ppm_consumer_t;
+#else
+typedef struct ppm_consumer_t ppm_consumer_t;
+#endif /* UDIG */
 
 #endif /* EVENTS_PUBLIC_H_ */

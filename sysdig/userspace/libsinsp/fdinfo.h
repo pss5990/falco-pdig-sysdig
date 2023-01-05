@@ -89,9 +89,9 @@ public:
 
 	~sinsp_fdinfo()
 	{
-		if(m_callbaks != NULL)
+		if(m_callbacks != NULL)
 		{
-			delete m_callbaks;
+			delete m_callbacks;
 		}
 
 		if(m_usrstate != NULL)
@@ -118,13 +118,14 @@ public:
 		m_oldname = other.m_oldname;
 		m_flags = other.m_flags;
 		m_dev = other.m_dev;
+		m_mount_id = other.m_mount_id;
 		m_ino = other.m_ino;
 		
 		if(free_state)
 		{
-			if(m_callbaks != NULL)
+			if(m_callbacks != NULL)
 			{
-				delete m_callbaks;
+				delete m_callbacks;
 			}
 
 			if(m_usrstate != NULL)
@@ -133,14 +134,14 @@ public:
 			}
 		}
 
-		if(other.m_callbaks != NULL)
+		if(other.m_callbacks != NULL)
 		{
-			m_callbaks = new fd_callbacks_info();
-			*m_callbaks = *other.m_callbaks;
+			m_callbacks = new fd_callbacks_info();
+			*m_callbacks = *other.m_callbacks;
 		}
 		else
 		{
-			m_callbaks = NULL;
+			m_callbacks = NULL;
 		}
 
 		if(other.m_usrstate != NULL)
@@ -342,7 +343,7 @@ public:
 
 	inline bool has_decoder_callbacks()
 	{
-		return (m_callbaks != NULL);
+		return (m_callbacks != NULL);
 	}
 
 VISIBILITY_PRIVATE
@@ -492,9 +493,10 @@ private:
 	T* m_usrstate;
 	uint32_t m_flags;
 	uint32_t m_dev;
+	uint32_t m_mount_id;
 	uint64_t m_ino;
 
-	fd_callbacks_info* m_callbaks;
+	fd_callbacks_info* m_callbacks;
 
 	friend class sinsp;
 	friend class sinsp_parser;
@@ -505,8 +507,8 @@ private:
 	friend class sinsp_filter_check_fd;
 	friend class sinsp_filter_check_event;
 	friend class lua_cbacks;
-	friend class sinsp_proto_detector;
 	friend class sinsp_baseliner;
+	friend class protocol_manager;
 };
 
 /*@}*/
@@ -553,6 +555,7 @@ public:
 	#endif
 			m_last_accessed_fd = fd;
 			m_last_accessed_fdinfo = &(fdit->second);
+			lookup_device(&(fdit->second), fd);
 			return &(fdit->second);
 		}
 	}
@@ -573,4 +576,8 @@ public:
 	//
 	int64_t m_last_accessed_fd;
 	sinsp_fdinfo_t *m_last_accessed_fdinfo;
+	uint64_t m_tid;
+
+private:
+	void lookup_device(sinsp_fdinfo_t* fdi, uint64_t fd);
 };

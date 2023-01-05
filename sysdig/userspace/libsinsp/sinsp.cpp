@@ -40,9 +40,13 @@ limitations under the License.
 #include "dns_manager.h"
 
 #ifndef CYGWING_AGENT
+#ifndef MINIMAL_BUILD
 #include "k8s_api_handler.h"
+#endif // MINIMAL_BUILD
 #ifdef HAS_CAPTURE
+#ifndef MINIMAL_BUILD
 #include <curl/curl.h>
+#endif // MINIMAL_BUILD
 #include <mntent.h>
 #endif
 #endif
@@ -70,7 +74,7 @@ sinsp::sinsp() :
 	m_container_manager(this),
 	m_suppressed_comms()
 {
-#if !defined(CYGWING_AGENT) && defined(HAS_CAPTURE)
+#if !defined(MINIMAL_BUILD) && !defined(CYGWING_AGENT) && defined(HAS_CAPTURE)
 	// used by mesos and container_manager
 	curl_global_init(CURL_GLOBAL_DEFAULT);
 #endif
@@ -108,6 +112,7 @@ sinsp::sinsp() :
 	m_buffer_format = sinsp_evt::PF_NORMAL;
 	m_input_fd = 0;
 	m_bpf = false;
+	m_udig = false;
 	m_isdebug_enabled = false;
 	m_isfatfile_enabled = false;
 	m_isinternal_events_enabled = false;
@@ -155,7 +160,7 @@ sinsp::sinsp() :
 	m_meinfo.m_n_procinfo_evts = 0;
 	m_meta_event_callback = NULL;
 	m_meta_event_callback_data = NULL;
-#ifndef CYGWING_AGENT
+#if !defined(CYGWING_AGENT) && !defined(MINIMAL_BUILD)
 	m_k8s_client = NULL;
 	m_k8s_last_watch_time_ns = 0;
 
@@ -165,7 +170,7 @@ sinsp::sinsp() :
 
 	m_mesos_client = NULL;
 	m_mesos_last_watch_time_ns = 0;
-#endif
+#endif // !defined(CYGWING_AGENT) && !defined(MINIMAL_BUILD)
 
 	m_filter_proc_table_when_saving = false;
 }
@@ -204,7 +209,7 @@ sinsp::~sinsp()
 
 	m_container_manager.cleanup();
 
-#ifndef CYGWING_AGENT
+#if !defined(CYGWING_AGENT) && !defined(MINIMAL_BUILD)
 	delete m_k8s_client;
 	delete m_k8s_api_server;
 	delete m_k8s_api_cert;
@@ -441,7 +446,7 @@ void sinsp::set_import_users(bool import_users)
 	m_import_users = import_users;
 }
 
-void sinsp::open(uint32_t timeout_ms)
+void sinsp::open_live_common(uint32_t timeout_ms, scap_mode_t mode)
 {
 	char error[SCAP_LASTERR_SIZE];
 
@@ -455,12 +460,13 @@ void sinsp::open(uint32_t timeout_ms)
 	//
 	// Start the capture
 	//
-	m_mode = SCAP_MODE_LIVE;
+	m_mode = mode;
 	scap_open_args oargs;
-	oargs.mode = SCAP_MODE_LIVE;
+	oargs.mode = mode;
 	oargs.fname = NULL;
 	oargs.proc_callback = NULL;
 	oargs.proc_callback_context = NULL;
+	oargs.udig = m_udig;
 
 	if(!m_filter_proc_table_when_saving)
 	{
@@ -493,6 +499,17 @@ void sinsp::open(uint32_t timeout_ms)
 	scap_set_refresh_proc_table_when_saving(m_h, !m_filter_proc_table_when_saving);
 
 	init();
+}
+
+void sinsp::open(uint32_t timeout_ms)
+{
+	open_live_common(timeout_ms, SCAP_MODE_LIVE);
+}
+
+void sinsp::open_udig(uint32_t timeout_ms)
+{
+	m_udig = true;
+	open_live_common(timeout_ms, SCAP_MODE_LIVE);
 }
 
 void sinsp::open_nodriver()
@@ -1132,7 +1149,7 @@ int32_t sinsp::next(OUT sinsp_evt **puevt)
 	//
 	// If required, retrieve the processes cpu from the kernel
 	//
-	if(m_get_procs_cpu_from_driver && is_live())
+	if(m_get_procs_cpu_from_driver && is_live() && !m_udig)
 	{
 		if(ts > m_next_flush_time_ns)
 		{
@@ -1182,7 +1199,7 @@ int32_t sinsp::next(OUT sinsp_evt **puevt)
 
 #ifndef HAS_ANALYZER
 	//
-	// Deleayed removal of threads from the thread table, so that
+	// Delayed removal of threads from the thread table, so that
 	// things like exit() or close() can be parsed.
 	// We only do this if the analyzer is not enabled, because the analyzer
 	// needs the process at the end of the sample and will take care of deleting
@@ -1228,17 +1245,19 @@ int32_t sinsp::next(OUT sinsp_evt **puevt)
 		m_thread_manager->remove_inactive_threads();
 		m_container_manager.remove_inactive_containers();
 
+#if !defined(CYGWING_AGENT) && !defined(MINIMAL_BUILD)
 		update_k8s_state();
 
 		if(m_mesos_client)
 		{
 			update_mesos_state();
 		}
+#endif // !defined(CYGWING_AGENT) && !defined(MINIMAL_BUILD)
 	}
 #endif // HAS_ANALYZER
 
 	//
-	// Deleayed removal of the fd, so that
+	// Delayed removal of the fd, so that
 	// things like exit() or close() can be parsed.
 	//
 	uint32_t nfdr = (uint32_t)m_fds_to_remove->size();
@@ -2065,7 +2084,7 @@ bool sinsp::remove_inactive_threads()
 	return m_thread_manager->remove_inactive_threads();
 }
 
-#ifndef CYGWING_AGENT
+#if !defined(CYGWING_AGENT) && !defined(MINIMAL_BUILD)
 void sinsp::init_mesos_client(string* api_server, bool verbose)
 {
 	m_verbose_json = verbose;

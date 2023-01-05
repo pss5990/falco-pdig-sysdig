@@ -16,7 +16,9 @@
 # limitations under the License.
 #
 include_directories("${PROJECT_SOURCE_DIR}/common")
+if(NOT MINIMAL_BUILD)
 include_directories("${ZLIB_INCLUDE}")
+endif()
 if(CYGWIN)
 include_directories("${WIN_HAL_INCLUDE}")
 endif()
@@ -33,6 +35,12 @@ list(APPEND targetfiles
 	../../driver/dynamic_params_table.c
 	../../driver/event_table.c
 	../../driver/flags_table.c)
+
+if(NOT APPLE)
+	list(APPEND targetfiles
+		scap_udig.c)
+endif()
+
 
 if(CMAKE_SYSTEM_NAME MATCHES "Linux")
 	list(APPEND targetfiles
@@ -51,7 +59,7 @@ endif()
 add_library(scap STATIC
 	${targetfiles})
 
-if(USE_BUNDLED_ZLIB)
+if(USE_BUNDLED_ZLIB AND NOT MINIMAL_BUILD)
 	add_dependencies(scap zlib)
 endif()
 
@@ -59,9 +67,11 @@ if (CMAKE_SYSTEM_NAME MATCHES "SunOS")
 	target_link_libraries(scap
 		socket nsl)
 elseif (CMAKE_SYSTEM_NAME MATCHES "Linux")
-	target_link_libraries(scap
-		elf
-		rt)
+	if(NOT MINIMAL_BUILD)
+		target_link_libraries(scap
+			elf
+			rt)
+	endif()
 elseif (WIN32)
 	target_link_libraries(scap
 		Ws2_32.lib)
@@ -71,8 +81,10 @@ elseif (CYGWIN)
 		${WIN_HAL_LIB}/dragent_win_hal.lib)
 endif()
 
+if(NOT MINIMAL_BUILD)
 target_link_libraries(scap
 	"${ZLIB_LIB}")
+endif()
 
 if(CMAKE_SYSTEM_NAME MATCHES "Linux")
     option(BUILD_LIBSCAP_EXAMPLES "Build libscap examples" ON)
