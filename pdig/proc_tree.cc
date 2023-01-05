@@ -7,8 +7,11 @@
 #include <stdlib.h>
 #include <string>
 #include <sys/ptrace.h>
+<<<<<<< HEAD
 #include <sys/signal.h>
 #include <sys/time.h>
+=======
+>>>>>>> fec5758bc1315e922b93bc06cc5e59c27a2666a6
 #include <unordered_map>
 #include <unordered_set>
 
@@ -94,7 +97,11 @@ static pid2pid_map build_process_tree()
 			if(ptid > 0) {
 				proc_tree.emplace(tgid, ptid);
 			} else {
+<<<<<<< HEAD
 				DEBUG("Failed to get parent tgid of %d\n", tgid);
+=======
+				WARN("Failed to get parent tgid of %d", tgid);
+>>>>>>> fec5758bc1315e922b93bc06cc5e59c27a2666a6
 			}
 		}
 	}
@@ -167,8 +174,13 @@ bool attach_thread(pid_t tid, pid_t tgid, pdig_context& main_ctx)
 			main_ctx.incomplete_mt_procs.emplace(tgid, 10);
 		}
 
+<<<<<<< HEAD
 		DEBUG("PTRACE_ATTACH(tid=%d; use_seccomp=%d)\n", tid, use_seccomp);
 		TRY(ptrace(PTRACE_ATTACH, tid, 0, 0));
+=======
+		DEBUG("PTRACE_ATTACH(tid=%d)\n", tid);
+		EXPECT(ptrace(PTRACE_ATTACH, tid, 0, 0));
+>>>>>>> fec5758bc1315e922b93bc06cc5e59c27a2666a6
 		return true;
 	}
 
@@ -208,6 +220,7 @@ void attach_all_threads(pid_t tgid, pdig_context& main_ctx)
 	}
 }
 
+<<<<<<< HEAD
 // try to attach to remaining threads of (multithreaded) processes
 // that we've partially attached to
 // returns the number of new threads found
@@ -218,6 +231,12 @@ static size_t find_threads_to_attach(pdig_context& main_ctx)
 	for(auto it = main_ctx.incomplete_mt_procs.begin(); it != main_ctx.incomplete_mt_procs.end(); /**/) {
 		auto n_attached = _attach_all_threads(it->first, main_ctx);
 		total_attached += n_attached;
+=======
+void find_threads_to_attach(pdig_context& main_ctx)
+{
+	for(auto it = main_ctx.incomplete_mt_procs.begin(); it != main_ctx.incomplete_mt_procs.end(); /**/) {
+		auto n_attached = _attach_all_threads(it->first, main_ctx);
+>>>>>>> fec5758bc1315e922b93bc06cc5e59c27a2666a6
 		if(n_attached) {
 			if(--(it->second) == 0) {
 				WARN("Failed to attach to all threads of tgid %d, are you running a fork bomb?", it->first);
@@ -233,6 +252,7 @@ static size_t find_threads_to_attach(pdig_context& main_ctx)
 
 		++it;
 	}
+<<<<<<< HEAD
 
 	return total_attached;
 }
@@ -241,6 +261,11 @@ static size_t find_threads_to_attach(pdig_context& main_ctx)
 // (children of an attached process)
 // returns the number of new processes found
 static size_t find_procs_to_attach(pdig_context& main_ctx)
+=======
+}
+
+size_t find_procs_to_attach(pdig_context& main_ctx)
+>>>>>>> fec5758bc1315e922b93bc06cc5e59c27a2666a6
 {
 	size_t n_attached = 0;
 
@@ -254,6 +279,11 @@ static size_t find_procs_to_attach(pdig_context& main_ctx)
 	const auto proc_tree = build_process_tree();
 	for(const auto& it : proc_tree) {
 		if(need_to_attach(it.first, proc_tree, main_ctx.procs)) {
+<<<<<<< HEAD
+=======
+			// TODO what if the main thread has exited and tid != tgid?
+			// how does it look in /proc?
+>>>>>>> fec5758bc1315e922b93bc06cc5e59c27a2666a6
 			n_attached += attach_thread(it.first, it.first, main_ctx);
 		}
 	}
@@ -265,6 +295,7 @@ static size_t find_procs_to_attach(pdig_context& main_ctx)
 
 	return n_attached;
 }
+<<<<<<< HEAD
 
 static constexpr const uint64_t NSEC_PER_SEC = 1000000000;
 
@@ -358,3 +389,5 @@ bool schedule_next_proc_scan_if_needed(pdig_context& main_ctx)
 	}
 	return true;
 }
+=======
+>>>>>>> fec5758bc1315e922b93bc06cc5e59c27a2666a6

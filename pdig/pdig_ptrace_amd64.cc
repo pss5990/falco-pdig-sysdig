@@ -7,7 +7,10 @@
 #include <sys/prctl.h>
 #include <sys/user.h>
 #include <sys/wait.h>
+<<<<<<< HEAD
 #include <sys/uio.h>
+=======
+>>>>>>> fec5758bc1315e922b93bc06cc5e59c27a2666a6
 
 static inline unsigned long align_down(unsigned long n, size_t shift)
 {

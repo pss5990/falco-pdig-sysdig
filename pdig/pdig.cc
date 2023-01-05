@@ -61,6 +61,7 @@ static bool wait_for_next_syscall(pid_t tid, pdig_process_context& pctx)
 		EXPECT(ptrace(PTRACE_CONT, tid, NULL, NULL));
 	} else {
 		EXPECT(ptrace(PTRACE_SYSCALL, tid, NULL, NULL));
+<<<<<<< HEAD
 	}
 
 	pctx.state = process_state::waiting_for_enter;
@@ -73,10 +74,27 @@ static bool deliver_signal(pid_t tid, pdig_process_context& pctx, int sig)
 		EXPECT(ptrace(PTRACE_CONT, tid, sig, sig));
 	} else {
 		EXPECT(ptrace(PTRACE_SYSCALL, tid, sig, sig));
+=======
+>>>>>>> fec5758bc1315e922b93bc06cc5e59c27a2666a6
 	}
 
 	pctx.state = process_state::waiting_for_enter;
 	return true;
+<<<<<<< HEAD
+=======
+}
+
+static bool deliver_signal(pid_t tid, pdig_process_context& pctx, int sig)
+{
+	if(pctx.use_seccomp) {
+		EXPECT(ptrace(PTRACE_CONT, tid, sig, sig));
+	} else {
+		EXPECT(ptrace(PTRACE_SYSCALL, tid, sig, sig));
+	}
+
+	pctx.state = process_state::waiting_for_enter;
+	return true;
+>>>>>>> fec5758bc1315e922b93bc06cc5e59c27a2666a6
 }
 
 void handle_syscall(pid_t pid, pdig_process_context& pctx, bool enter)
@@ -323,6 +341,7 @@ static bool handle_signal(pid_t tid, int sig, pdig_context& main_ctx)
 		switch(pctx.state) {
 		case process_state::attaching_first_syscall_enter:
 			return handle_attaching_first_syscall_enter(tid, pctx);
+<<<<<<< HEAD
 
 		case process_state::attaching_first_syscall_exit:
 			return handle_attaching_first_syscall_exit(tid, pctx, main_ctx);
@@ -330,12 +349,22 @@ static bool handle_signal(pid_t tid, int sig, pdig_context& main_ctx)
 		case process_state::waiting_for_enter:
 			return handle_syscall_enter(tid, pctx);
 
+=======
+
+		case process_state::attaching_first_syscall_exit:
+			return handle_attaching_first_syscall_exit(tid, pctx, main_ctx);
+
+		case process_state::waiting_for_enter:
+			return handle_syscall_enter(tid, pctx);
+
+>>>>>>> fec5758bc1315e922b93bc06cc5e59c27a2666a6
 		case process_state::waiting_for_exit:
 			return handle_syscall_exit(tid, pctx, main_ctx);
 
 		default:
 			WARN("Got signal %04x for tid %u in state %d", sig, tid, static_cast<int>(pctx.state));
 			return true;
+<<<<<<< HEAD
 	}
 	case SIGTRAP | (PTRACE_EVENT_EXEC << 8):
 		return handle_execve_exit(tid, pctx);
@@ -353,6 +382,25 @@ static bool handle_signal(pid_t tid, int sig, pdig_context& main_ctx)
 		}
 		return deliver_signal(tid, pctx, sig);
 	}
+=======
+	}
+	case SIGTRAP | (PTRACE_EVENT_EXEC << 8):
+		return handle_execve_exit(tid, pctx);
+	case SIGTRAP | (PTRACE_EVENT_EXIT << 8):
+		return handle_exit(tid, pctx);
+	case SIGTRAP | (PTRACE_EVENT_CLONE << 8):
+	case SIGTRAP | (PTRACE_EVENT_VFORK << 8):
+	case SIGTRAP | (PTRACE_EVENT_FORK << 8):
+		return handle_ptrace_clone_event(tid, pctx, main_ctx);
+	case SIGTRAP:
+		return wait_for_next_syscall(tid, pctx);
+	default:
+		if((sig & 0x3f) == SIGTRAP) {
+			WARN("Got unhandled signal %04x for tid %u in state %d", sig, tid, static_cast<int>(pctx.state));
+		}
+		return deliver_signal(tid, pctx, sig);
+	}
+>>>>>>> fec5758bc1315e922b93bc06cc5e59c27a2666a6
 }
 
 static bool handle_waitpid(pid_t tid, int status, pdig_context& main_ctx)
@@ -525,9 +573,22 @@ int main(int argc, char **argv)
 			break;
 		}
 		EXPECT(pid);
+<<<<<<< HEAD
 		handle_waitpid(pid, status, main_ctx);
 	} while(!main_ctx.procs.empty());
 
+=======
+
+		// MASSIVE TODO: this must be time-based, not randomly dependent on syscall timing
+		find_threads_to_attach(main_ctx);
+		if(attach_proc_tree) {
+			find_procs_to_attach(main_ctx);
+		}
+
+		handle_waitpid(pid, status, main_ctx);
+	} while(!main_ctx.procs.empty());
+
+>>>>>>> fec5758bc1315e922b93bc06cc5e59c27a2666a6
 	free(main_ctx.seccomp_filter);
 	return exitcode;
 }

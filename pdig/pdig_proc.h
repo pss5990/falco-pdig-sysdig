@@ -57,8 +57,11 @@ struct pdig_context {
 	std::unordered_map<pid_t, size_t> incomplete_mt_procs;
 
 	size_t full_proc_scans_remaining;
+<<<<<<< HEAD
 	bool need_more_scans;
 	uint64_t last_scan_ns;
 	int scans_so_far;
+=======
+>>>>>>> fec5758bc1315e922b93bc06cc5e59c27a2666a6
 };
 

@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+<<<<<<< HEAD
 #define TRY(v) do { \
     int __ret = (v); \
 	if(__ret < 0) { \
@@ -13,6 +14,8 @@
 	} \
 } while(0)
 
+=======
+>>>>>>> fec5758bc1315e922b93bc06cc5e59c27a2666a6
 #define EXPECT(v) do { \
     int __ret = (v); \
 	if(__ret < 0) { \
